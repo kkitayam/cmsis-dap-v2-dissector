@@ -1,6 +1,9 @@
 cmsis_dap_v2 = Proto("USBDAP", "USB CMSIS-DAP protocol")
 
+local field_usb_transfer_type = Field.new("usb.transfer_type")
 local field_usb_endpointdir = Field.new("usb.endpoint_address.direction")
+local field_usb_device_address = Field.new("usb.device_address")
+
 
 local id_vals = {
    [0x01] = "Vendor Name",
@@ -61,6 +64,10 @@ local port_vals = {[0] = "Default", [1] = "SWD", [2] = "JTAG"}
 
 local ack_vals = {[1] = "OK", [2] = "WAIT", [3] = "FAULT", [4] = "NO_ACKT"}
 
+cmsis_dap_v2.fields.req = ProtoField.framenum("cmsis_dap.request", "Request", base.NONE, frametype.REQUEST)
+cmsis_dap_v2.fields.res = ProtoField.framenum("cmsis_dap.response", "Response", base.NONE, frametype.RESPONSE)
+
+local reqest  = ProtoField.uint8("cmsis_dap.command", "Command", base.HEX, command_vals)
 local command = ProtoField.uint8("cmsis_dap.command", "Command", base.HEX, command_vals)
 local info_id = ProtoField.uint8("cmsis_dap.info.id", "Id", base.HEX, id_vals)
 local info_len = ProtoField.uint8("cmsis_dap.info.len", "Len", base.DEC_HEX)
@@ -145,10 +152,7 @@ local CMSIS_DAP_COMMANDS = {
    DAP_EXECUTE_COMMANDS    = 127
 }
 
--- address ‚Æ 
-
-reqlist = {}
-reslist = {}
+convlist = {}
 
 function parse_out_transfer(cnt, buffer, tree)
    local pos = 0
@@ -239,21 +243,46 @@ function cmsis_dap_v2.dissector(buffer, pinfo, tree)
    len = buffer:len()
    if len == 0 then return end
 
-   print(tostring(pinfo.number) .. " " .. tostring(pinfo.port_type) .. " src " .. tostring(pinfo.src_port) .. " dst " .. tostring(pinfo.dst_port))
+   local xfer = field_usb_transfer_type().value
+   local dev_adr = field_usb_device_address().value
+   local is_request = (field_usb_endpointdir().value == 0)
 
-   local src, dst = tostring(pinfo.src), tostring(pinfo.dst)
+   if convlist[dev_adr] == nil then
+      convlist[dev_adr] = {}
+      convlist[dev_adr].seq = {} -- frame number to sequence number
+      convlist[dev_adr].req = {} -- sequence number to request frame number
+      convlist[dev_adr].res = {} -- sequence number to response frame number
+   end
 
-   pinfo.cols.protocol = cmsis_dap_v2.name
+   print(tostring(pinfo.number) .. " xfer " .. tostring(xfer) .. " adr " .. tostring(dev_adr) .. " req " .. tostring(is_request))
 
-   print("dir" .. tostring(pinfo.cols.direction))
-    
+   local seq_num = -1
+   if is_request then
+      if convlist[dev_adr].req[pinfo.number] == nil then
+         table.insert(convlist[dev_adr].req, pinfo.number)
+         seq_num = #convlist[dev_adr].req
+         convlist[dev_adr].seq[pinfo.number] = seq_num
+      else
+         seq_num = convlist[dev_adr].seq[pinfo.number]
+      end
+   else
+      if convlist[dev_adr].res[pinfo.number] == nil then
+         table.insert(convlist[dev_adr].res, pinfo.number)
+         seq_num = #convlist[dev_adr].res
+         convlist[dev_adr].seq[pinfo.number] = seq_num
+      else
+         seq_num = convlist[dev_adr].seq[pinfo.number]
+      end
+   end
+
    local subtree = tree:add(cmsis_dap_v2, buffer(), "CMSIS-DAP")
-
    local cmd = buffer(0, 1):le_uint()
 
    subtree:add_le( command, buffer(0, 1))
-   local is_request = (field_usb_endpointdir().value == 0)
    if is_request then
+      if convlist[dev_adr].res[seq_num] ~= nil then
+         subtree:add( cmsis_dap_v2.fields.res, convlist[dev_adr].res[seq_num])
+      end
       info_text = command_vals[buffer(0,1):le_uint()] .. " Request "
       if cmd == CMSIS_DAP_COMMANDS.DAP_INFO then
          info_text = info_text .. id_vals[buffer(1,1):le_uint()]
@@ -297,6 +326,7 @@ function cmsis_dap_v2.dissector(buffer, pinfo, tree)
       end
       pinfo.cols.info = info_text
    else
+      subtree:add( cmsis_dap_v2.fields.req, convlist[dev_adr].req[seq_num])
       info_text = command_vals[buffer(0,1):le_uint()] .. " Response "
       if cmd == CMSIS_DAP_COMMANDS.DAP_INFO then
          subtree:add_le( info_len, buffer(1, 1))
@@ -316,7 +346,6 @@ function cmsis_dap_v2.dissector(buffer, pinfo, tree)
       end
       pinfo.cols.info = info_text
    end
-    
 end
 
 DissectorTable.get("usb.bulk"):add(0xff, cmsis_dap_v2)

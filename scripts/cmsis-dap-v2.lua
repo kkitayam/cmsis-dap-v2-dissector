@@ -191,7 +191,6 @@ function dissect_response(buffer, tree)
    return names.response[buffer(0, 1):le_uint()]
 end
 
-
 function dissect_info(is_request, buffer, tree, convinf)
    if is_request then
       local id = buffer(0,1):le_uint()
@@ -248,6 +247,21 @@ function dissect_info(is_request, buffer, tree, convinf)
    return names.id[id]
 end
 
+function dissect_host_status(is_request, buffer, tree)
+   if is_request then
+      tree:add_le( dap.fields.hs_type, buffer(0, 1))
+      tree:add_le( dap.fields.hs_status, buffer(1, 1))
+   else
+      -- TODO: add expert info
+      return ""
+   end
+end
+
+function dissect_dap_connect(is_request, buffer, tree)
+   tree:add_le( dap.fields.port, buffer(0, 1))
+   return names.port[buffer(0, 1):le_uint()]
+end
+
 function dissect_swj_clk(is_request, buffer, tree)
    if is_request then
       tree:add_le( dap.fields.swj_clk, buffer(0, 4))
@@ -272,6 +286,16 @@ function dissect_swd_configure(is_request, buffer, tree)
       local subtree = tree:add_le( dap.fields.swd_cfg, buffer(0, 1))
       tree:add_le( dap.fields.swd_tcp, buffer(0, 1))
       tree:add_le( dap.fields.swd_dp, buffer(0, 1))
+      return ""
+   else
+      return dissect_response(buffer, tree)
+   end
+end
+
+function dissect_write_abort(is_request, buffer, tree)
+   if is_request then
+      subtree:add_le( dap.fields.index, buffer(0, 1))
+      subtree:add_le( dap.fields.write_abort, buffer(1, 4))
       return ""
    else
       return dissect_response(buffer, tree)
@@ -425,20 +449,13 @@ function dap.dissector(buffer, pinfo, tree)
    if cmd == vals.command.DAP_INFO then
       info_text = info_text .. dissect_info(is_request, buffer(1), subtree, convlist[dev_adr].inf[seq_num])
    elseif cmd == vals.command.DAP_HOST_STATUS then
-      if is_request then
-         subtree:add_le( dap.fields.hs_type, buffer(1, 1))
-         subtree:add_le( dap.fields.hs_status, buffer(2, 1))
-      end
+      info_text = info_text .. dissect_host_status(is_request, buffer(1), subtree)
    elseif cmd == vals.command.DAP_CONNECT then
-      if is_request then            
-         subtree:add_le( dap.fields.port, buffer(1, 1))
-         info_text = info_text .. names.port[buffer(1, 1):le_uint()]
-      end
+      info_text = info_text .. dissect_dap_connect(is_request, buffer(1), subtree)
+   elseif cmd == vals.command.DAP_DISCONNECT then
+      info_text = info_text .. dissect_dap_disconnect(is_request, buffer(1), subtree)
    elseif cmd == vals.command.DAP_WRITE_ABORT then
-      if is_request then
-         subtree:add_le( dap.fields.index, buffer(1, 1))
-         subtree:add_le( dap.fields.write_abort, buffer(2, 4))
-      end
+      info_text = info_text .. dissect_write_abbort(is_request, buffer(1), subtree)
    elseif cmd == vals.command.DAP_DELAY then
       if is_request then
          subtree:add_le( dap.fields.dap_delay, buffer(1, 2))

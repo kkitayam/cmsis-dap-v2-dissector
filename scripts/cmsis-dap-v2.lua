@@ -202,6 +202,9 @@ function dissect_info(is_request, buffer, tree, convinf)
    tree:add_le( dap.fields.len, buffer(0, 1))
    local id = convinf.id
    local len = buffer(0,1):le_uint()
+   if 0 == len then
+      return names.id[id]
+   end
    if vals.id.VENDOR_NAME == id then
       tree:add( dap.fields.vendor, buffer(1))
    elseif vals.id.PRODUCT_NAME == id then
@@ -251,6 +254,7 @@ function dissect_host_status(is_request, buffer, tree)
    if is_request then
       tree:add_le( dap.fields.hs_type, buffer(0, 1))
       tree:add_le( dap.fields.hs_status, buffer(1, 1))
+      return names.led[buffer(0, 1):le_uint()]
    else
       -- TODO: add expert info
       return ""
@@ -260,6 +264,15 @@ end
 function dissect_dap_connect(is_request, buffer, tree)
    tree:add_le( dap.fields.port, buffer(0, 1))
    return names.port[buffer(0, 1):le_uint()]
+end
+
+function dissect_dap_disconnect(is_request, buffer, tree)
+   if is_request then
+      -- TODO: add expert info
+      return ""
+   else
+      return dissect_response(buffer, tree)
+   end
 end
 
 function dissect_swj_clk(is_request, buffer, tree)
@@ -296,6 +309,15 @@ function dissect_write_abort(is_request, buffer, tree)
    if is_request then
       subtree:add_le( dap.fields.index, buffer(0, 1))
       subtree:add_le( dap.fields.write_abort, buffer(1, 4))
+      return ""
+   else
+      return dissect_response(buffer, tree)
+   end
+end
+
+function dissect_dap_delay(is_request, buffer, tree)
+   if is_request then
+      subtree:add_le( dap.fields.dap_delay, buffer(0, 2))
       return ""
    else
       return dissect_response(buffer, tree)
@@ -359,43 +381,43 @@ function parse_in_transfer(cnt, buffer, tree)
    subtree:add_le(dap.fields.xfer_miss, buffer(0, 1))
 end
 
-function parse_out_transfer_block(cnt, buffer, tree)
-   local tr = buffer(0, 1):le_uint()
-   local is_read = (bit.band(tr, 0x2) ~= 0)
+function dissect_transfer_block(is_request, buffer, tree, convinf)
+   if is_request then
+      tree:add_le( dap.fields.dap_index, buffer(0, 1))
+      tree:add_le( dap.fields.xfer_blk_cnt, buffer(1, 2))
+      local cnt = buffer(1, 2):le_uint()
+      local is_read = (bit.band(buffer(3, 1):le_uint(), 0x2) ~= 0)
+      local subtree = tree:add_le(dap.fields.xfer_req, buffer(3, 1))
+      subtree:add_le(dap.fields.xfer_apndp, buffer(3, 1))
+      subtree:add_le(dap.fields.xfer_rnw, buffer(3, 1))
+      subtree:add_le(dap.fields.xfer_a23, buffer(3, 1))
+      if is_read then
+         return tostring(cnt) .. " word(s) " .. "Read"
+      end
+      local pos = 4
+      for i = 1, cnt do
+         tree:add_le(dap.fields.xfer_wdat, buffer(pos, 4))
+         pos = pos + 4
+      end
+      return tostring(cnt) .. " word(s) " .. "Write"
+   else
+      tree:add_le( dap.fields.xfer_blk_cnt, buffer(0, 2))
+      local cnt = buffer(0, 2):le_uint()
+      local ack = buffer(2, 1):le_uint()
+      local subtree = tree:add_le( dap.fields.xfer_rsp, buffer(2, 1))
+      subtree:add_le( dap.fields.xfer_ack, buffer(2, 1))
+      subtree:add_le( dap.fields.xfer_perr, buffer(2, 1))
 
-   local subtree = tree:add_le(dap.fields.xfer_req, buffer(0, 1))
-   subtree:add_le(dap.fields.xfer_apndp, buffer(0, 1))
-   subtree:add_le(dap.fields.xfer_rnw, buffer(0, 1))
-   subtree:add_le(dap.fields.xfer_a23, buffer(0, 1))
-
-   if is_read then
-      return "Read"
+      if buffer:len() <= 3 then
+         return names.ack[ack] .. " "  .. tostring(cnt) .. " word(s) " .. "Write"
+      end
+      local pos = 3
+      for i = 1, cnt do
+         tree:add_le( dap.fields.xfer_rdat, buffer(pos, 4))
+         pos = pos + 4
+      end
+      return names.ack[ack] .. " "  .. tostring(cnt) .. " word(s) " .. "Read"
    end
-   local pos = 1
-   for i = 1, cnt do
-      tree:add_le(dap.fields.xfer_wdat, buffer(pos, 4))
-      pos = pos + 4
-   end
-   return "Write"
-end
-
-function parse_in_transfer_block(cnt, buffer, tree)
-   local ack = buffer(0, 1):le_uint()
-
-   local subtree = tree:add_le( dap.fields.xfer_rsp, buffer(0, 1))
-   subtree:add_le( dap.fields.xfer_ack, buffer(0, 1))
-   subtree:add_le( dap.fields.xfer_perr, buffer(0, 1))
-
-   if buffer:len() <= 1 then
-      return "Write"
-   end
-
-   local pos = 1
-   for i = 1, cnt do
-      tree:add_le( dap.fields.xfer_rdat, buffer(pos, 4))
-      pos = pos + 4
-   end
-   return "Read"
 end
 
 function dap.dissector(buffer, pinfo, tree)
@@ -455,11 +477,9 @@ function dap.dissector(buffer, pinfo, tree)
    elseif cmd == vals.command.DAP_DISCONNECT then
       info_text = info_text .. dissect_dap_disconnect(is_request, buffer(1), subtree)
    elseif cmd == vals.command.DAP_WRITE_ABORT then
-      info_text = info_text .. dissect_write_abbort(is_request, buffer(1), subtree)
+      info_text = info_text .. dissect_write_abort(is_request, buffer(1), subtree)
    elseif cmd == vals.command.DAP_DELAY then
-      if is_request then
-         subtree:add_le( dap.fields.dap_delay, buffer(1, 2))
-      end
+      info_text = info_text .. dissect_dap_delay(is_request, buffer(1), subtree)
    elseif cmd == vals.command.DAP_SWJ_CLOCK then
       info_text = info_text .. dissect_swj_clk(is_request, buffer(1), subtree)
    elseif cmd == vals.command.DAP_SWJ_SEQUENCE then
@@ -483,19 +503,7 @@ function dap.dissector(buffer, pinfo, tree)
          info_text = info_text .. names.ack[ack] .. " " .. tostring(cnt) .. " word(s)"
       end
    elseif cmd == vals.command.DAP_TRANSFER_BLOCK then
-      if is_request then
-         subtree:add_le( dap.fields.dap_index, buffer(1, 1))
-         subtree:add_le( dap.fields.xfer_blk_cnt, buffer(2, 2))
-         local cnt = buffer(2, 2):le_uint()
-         local text = parse_out_transfer_block(cnt, buffer(4), subtree)
-         info_text = info_text .. tostring(cnt) .. " word(s) " .. text
-      else
-         subtree:add_le( dap.fields.xfer_blk_cnt, buffer(1, 2))
-         local cnt = buffer(1, 2):le_uint()
-         local ack = buffer(3, 1):le_uint()
-         local text = parse_in_transfer_block(cnt, buffer(3), subtree)
-         info_text = info_text .. names.ack[ack] .. " "  .. tostring(cnt) .. " word(s) " .. text
-      end
+      info_text = info_text .. dissect_transfer_block(is_request, buffer(1), subtree, convlist[dev_adr].inf[seq_num])
    end
    pinfo.cols.info = info_text
 

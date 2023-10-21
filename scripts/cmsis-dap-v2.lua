@@ -154,6 +154,16 @@ dap.fields.pktcnt = ProtoField.uint8("cmsis_dap.info.packet.count", "Packet Coun
 dap.fields.pktsz = ProtoField.uint16("cmsis_dap.info.packet.size", "Packet Size")
 dap.fields.hs_type = ProtoField.uint8("cmsis_dap.host_status.type", "Type", base.HEX, names.led)
 dap.fields.hs_status = ProtoField.uint8("cmsis_dap.host_status.status", "Status", base.HEX, {[0] = "False", [1] = "True"})
+dap.fields.swj_output = ProtoField.uint8("cmsis_dap.swj.pin.output", "Pin Output", base.HEX)
+dap.fields.swj_select = ProtoField.uint8("cmsis_dap.swj.pin.select", "Pin Select", base.HEX)
+dap.fields.swj_input = ProtoField.uint8("cmsis_dap.swj.pin.input", "Pin Input", base.HEX)
+dap.fields.swj_tck = ProtoField.uint8("cmsis_dap.swj.pin.swclk_tck", "SWCLK/TCK", base.HEX, nil, 0x1)
+dap.fields.swj_tms = ProtoField.uint8("cmsis_dap.swj.pin.swdio_tms", "SWDIO/TMS", base.HEX, nil, 0x2)
+dap.fields.swj_tdi = ProtoField.uint8("cmsis_dap.swj.pin.tdi", "TDI", base.HEX, nil, 0x4)
+dap.fields.swj_tdo = ProtoField.uint8("cmsis_dap.swj.pin.tdo", "TDO", base.HEX, nil, 0x8)
+dap.fields.swj_ntrst = ProtoField.uint8("cmsis_dap.swj.pin.ntrst", "nTRST", base.HEX, nil, 0x20)
+dap.fields.swj_nreset = ProtoField.uint8("cmsis_dap.swj.pin.nreset", "nRESET", base.HEX, nil, 0x80)
+dap.fields.swj_wait = ProtoField.uint32("cmsis_dap.swj.pin.wait", "Pin Wait", base.DEC_HEX)
 dap.fields.swj_clk = ProtoField.uint32("cmsis_dap.swj_clock", "Clock", base.DEC_HEX)
 dap.fields.swj_seq_cnt = ProtoField.uint8("cmsis_dap.swj_sequence.count", "Bit Count", base.DEC_HEX)
 dap.fields.swj_seq_dat = ProtoField.bytes("cmsis_dap.swj_sequence.data", "Bit Data")
@@ -164,6 +174,7 @@ dap.fields.port = ProtoField.uint8("cmsis_dap.connect.port", "Port", base.HEX, n
 dap.fields.dap_index = ProtoField.uint8("cmsis_dap.dap_index", "DAP Index", base.DEC_HEX)
 dap.fields.write_abort = ProtoField.uint32("cmsis_dap.write_abort", "Abort", base.DEC_HEX)
 dap.fields.dap_delay = ProtoField.uint32("cmsis_dap.delay", "Delay", base.DEC_HEX)
+dap.fields.execute = ProtoField.uint8("cmsis_dap.execute", "Execute", base.DEC_HEX)
 dap.fields.xfer_ic = ProtoField.uint8("cmsis_dap.transfer_config.idle_cycles", "Idle Cycles", base.DEC_HEX)
 dap.fields.xfer_wr = ProtoField.uint8("cmsis_dap.transfer_config.wait_retry", "WAIT Retry", base.DEC_HEX)
 dap.fields.xfer_mr = ProtoField.uint8("cmsis_dap.transfer_config.match_retry", "Match Retry", base.DEC_HEX)
@@ -275,55 +286,6 @@ function dissect_dap_disconnect(is_request, buffer, tree)
    end
 end
 
-function dissect_swj_clk(is_request, buffer, tree)
-   if is_request then
-      tree:add_le( dap.fields.swj_clk, buffer(0, 4))
-      return tostring(buffer(0, 4):le_uint()) .. "Hz"
-   else
-      return dissect_response(buffer, tree)
-   end
-end
-
-function dissect_swj_seq(is_request, buffer, tree)
-   if is_request then
-      tree:add_le( dap.fields.swj_seq_cnt, buffer(0, 1))
-      tree:add_le( dap.fields.swj_seq_dat, buffer(1))
-      return ""
-   else
-      return dissect_response(buffer, tree)
-   end
-end
-
-function dissect_swd_configure(is_request, buffer, tree)
-   if is_request then
-      local subtree = tree:add_le( dap.fields.swd_cfg, buffer(0, 1))
-      tree:add_le( dap.fields.swd_tcp, buffer(0, 1))
-      tree:add_le( dap.fields.swd_dp, buffer(0, 1))
-      return ""
-   else
-      return dissect_response(buffer, tree)
-   end
-end
-
-function dissect_write_abort(is_request, buffer, tree)
-   if is_request then
-      subtree:add_le( dap.fields.index, buffer(0, 1))
-      subtree:add_le( dap.fields.write_abort, buffer(1, 4))
-      return ""
-   else
-      return dissect_response(buffer, tree)
-   end
-end
-
-function dissect_dap_delay(is_request, buffer, tree)
-   if is_request then
-      subtree:add_le( dap.fields.dap_delay, buffer(0, 2))
-      return ""
-   else
-      return dissect_response(buffer, tree)
-   end
-end
-
 function dissect_transfer_configure(is_request, buffer, tree)
    if is_request then
       tree:add_le( dap.fields.xfer_ic, buffer(0, 1))
@@ -420,6 +382,95 @@ function dissect_transfer_block(is_request, buffer, tree, convinf)
    end
 end
 
+function dissect_write_abort(is_request, buffer, tree)
+   if is_request then
+      tree:add_le( dap.fields.index, buffer(0, 1))
+      tree:add_le( dap.fields.write_abort, buffer(1, 4))
+      return ""
+   else
+      return dissect_response(buffer, tree)
+   end
+end
+
+function dissect_dap_delay(is_request, buffer, tree)
+   if is_request then
+      tree:add_le( dap.fields.dap_delay, buffer(0, 2))
+      return ""
+   else
+      return dissect_response(buffer, tree)
+   end
+end
+
+function dissect_dap_reset_target(is_request, buffer, tree)
+   if is_request then
+      -- TODO: add expert info
+      return ""
+   else
+      text = dissect_response(buffer, tree)
+      tree:add_le( dap.fields.execute, buffer(1, 1))
+      return text
+   end
+end
+
+function dissect_swj_pins(is_request, buffer, tree)
+   if is_request then
+      local subtree = tree:add_le( dap.fields.swj_output, buffer(0, 1))
+      subtree:add_le( dap.fields.swj_tck, buffer(0, 1))
+      subtree:add_le( dap.fields.swj_tms, buffer(0, 1))
+      subtree:add_le( dap.fields.swj_tdi, buffer(0, 1))
+      subtree:add_le( dap.fields.swj_tdo, buffer(0, 1))
+      subtree:add_le( dap.fields.swj_ntrst, buffer(0, 1))
+      subtree:add_le( dap.fields.swj_nsrst, buffer(0, 1))
+      local subtree = tree:add_le( dap.fields.swj_select, buffer(1, 1))
+      subtree:add_le( dap.fields.swj_tck, buffer(1, 1))
+      subtree:add_le( dap.fields.swj_tms, buffer(1, 1))
+      subtree:add_le( dap.fields.swj_tdi, buffer(1, 1))
+      subtree:add_le( dap.fields.swj_tdo, buffer(1, 1))
+      subtree:add_le( dap.fields.swj_ntrst, buffer(1, 1))
+      subtree:add_le( dap.fields.swj_nsrst, buffer(1, 1))
+      tree:add_le( dap.fields.swj_wait, buffer(2, 4))
+      return ""
+   else
+      local subtree = tree:add_le( dap.fields.swj_input, buffer(0, 1))
+      subtree:add_le( dap.fields.swj_tck, buffer(0, 1))
+      subtree:add_le( dap.fields.swj_tms, buffer(0, 1))
+      subtree:add_le( dap.fields.swj_tdi, buffer(0, 1))
+      subtree:add_le( dap.fields.swj_tdo, buffer(0, 1))
+      subtree:add_le( dap.fields.swj_ntrst, buffer(0, 1))
+      subtree:add_le( dap.fields.swj_nsrst, buffer(0, 1))
+   end
+end
+
+function dissect_swj_clk(is_request, buffer, tree)
+   if is_request then
+      tree:add_le( dap.fields.swj_clk, buffer(0, 4))
+      return tostring(buffer(0, 4):le_uint()) .. "Hz"
+   else
+      return dissect_response(buffer, tree)
+   end
+end
+
+function dissect_swj_seq(is_request, buffer, tree)
+   if is_request then
+      tree:add_le( dap.fields.swj_seq_cnt, buffer(0, 1))
+      tree:add_le( dap.fields.swj_seq_dat, buffer(1))
+      return ""
+   else
+      return dissect_response(buffer, tree)
+   end
+end
+
+function dissect_swd_configure(is_request, buffer, tree)
+   if is_request then
+      local subtree = tree:add_le( dap.fields.swd_cfg, buffer(0, 1))
+      tree:add_le( dap.fields.swd_tcp, buffer(0, 1))
+      tree:add_le( dap.fields.swd_dp, buffer(0, 1))
+      return ""
+   else
+      return dissect_response(buffer, tree)
+   end
+end
+
 function dap.dissector(buffer, pinfo, tree)
    len = buffer:len()
    if len == 0 then return end
@@ -476,16 +527,6 @@ function dap.dissector(buffer, pinfo, tree)
       info_text = info_text .. dissect_dap_connect(is_request, buffer(1), subtree)
    elseif cmd == vals.command.DAP_DISCONNECT then
       info_text = info_text .. dissect_dap_disconnect(is_request, buffer(1), subtree)
-   elseif cmd == vals.command.DAP_WRITE_ABORT then
-      info_text = info_text .. dissect_write_abort(is_request, buffer(1), subtree)
-   elseif cmd == vals.command.DAP_DELAY then
-      info_text = info_text .. dissect_dap_delay(is_request, buffer(1), subtree)
-   elseif cmd == vals.command.DAP_SWJ_CLOCK then
-      info_text = info_text .. dissect_swj_clk(is_request, buffer(1), subtree)
-   elseif cmd == vals.command.DAP_SWJ_SEQUENCE then
-      info_text = info_text .. dissect_swj_seq(is_request, buffer(1), subtree)
-   elseif cmd == vals.command.DAP_SWD_CONFIGURE then
-      info_text = info_text .. dissect_swd_configure(is_request, buffer(1), subtree)
    elseif cmd == vals.command.DAP_TRANSFER_CONFIGURE then
       info_text = info_text .. dissect_transfer_configure(is_request, buffer(1), subtree)
    elseif cmd == vals.command.DAP_TRANSFER then
@@ -504,6 +545,60 @@ function dap.dissector(buffer, pinfo, tree)
       end
    elseif cmd == vals.command.DAP_TRANSFER_BLOCK then
       info_text = info_text .. dissect_transfer_block(is_request, buffer(1), subtree, convlist[dev_adr].inf[seq_num])
+   elseif cmd == vals.command.DAP_TRANSFER_ABORT then
+      -- TODO: add handling
+   elseif cmd == vals.command.DAP_WRITE_ABORT then
+      info_text = info_text .. dissect_write_abort(is_request, buffer(1), subtree)
+   elseif cmd == vals.command.DAP_DELAY then
+      info_text = info_text .. dissect_dap_delay(is_request, buffer(1), subtree)
+   elseif cmd == vals.command.DAP_RESET_TARGET then
+      info_text = dissect_dap_reset_target(is_request, buffer(1), tree)
+   elseif cmd == vals.command.DAP_SWJ_PINS then
+      info_text = dissect_swj_pins(is_request, buffer(1), tree)
+   elseif cmd == vals.command.DAP_SWJ_CLOCK then
+      info_text = info_text .. dissect_swj_clk(is_request, buffer(1), subtree)
+   elseif cmd == vals.command.DAP_SWJ_SEQUENCE then
+      info_text = info_text .. dissect_swj_seq(is_request, buffer(1), subtree)
+   elseif cmd == vals.command.DAP_SWD_CONFIGURE then
+      info_text = info_text .. dissect_swd_configure(is_request, buffer(1), subtree)
+   elseif cmd == vals.command.DAP_JTAG_SEQUENCE then
+      -- TODO: add handling
+   elseif cmd == vals.command.DAP_JTAG_CONFIGURE then
+      -- TODO: add handling
+   elseif cmd == vals.command.DAP_JTAG_IDCODE then
+      -- TODO: add handling
+   elseif cmd == vals.command.DAP_SWO_TRANSPORT then
+      -- TODO: add handling
+   elseif cmd == vals.command.DAP_SWO_MODE then
+      -- TODO: add handling
+   elseif cmd == vals.command.DAP_SWO_BAUDRATE then
+      -- TODO: add handling
+   elseif cmd == vals.command.DAP_SWO_CONTROL then
+      -- TODO: add handling
+   elseif cmd == vals.command.DAP_SWO_STATUS then
+      -- TODO: add handling
+   elseif cmd == vals.command.DAP_SWO_DATA then
+      -- TODO: add handling
+   elseif cmd == vals.command.DAP_SWO_DATA then
+      -- TODO: add handling
+   elseif cmd == vals.command.DAP_SWD_SEQUENCE then
+      -- TODO: add handling
+   elseif cmd == vals.command.DAP_SWD_EXTENDED_STATUS then
+      -- TODO: add handling
+   elseif cmd == vals.command.DAP_UART_TRANSPORT then
+      -- TODO: add handling
+   elseif cmd == vals.command.DAP_UART_CONFIGURE then
+      -- TODO: add handling
+   elseif cmd == vals.command.DAP_UART_TRANSFER then
+      -- TODO: add handling
+   elseif cmd == vals.command.DAP_UART_CONTROL then
+      -- TODO: add handling
+   elseif cmd == vals.command.DAP_UART_STATUS then
+      -- TODO: add handling
+   elseif cmd == vals.command.DAP_QUEUE_COMMANDS then
+      -- TODO: add handling
+   elseif cmd == vals.command.DAP_EXECUTE_COMMANDS then
+      -- TODO: add handling
    end
    pinfo.cols.info = info_text
 

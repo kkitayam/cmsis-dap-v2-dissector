@@ -197,6 +197,9 @@ dap.fields.xfer_perr = ProtoField.uint8("cmsis_dap.transfer.response.protocol_er
 dap.fields.xfer_miss = ProtoField.uint8("cmsis_dap.transfer.response.value_mismatch", "Value Mismtch", base.HEX, {[0]="Pass", [1]="Error"}, 0x10)
 dap.fields.xfer_rdat = ProtoField.uint32("cmsis_dap.transfer.read.data", "Read", base.DEC_HEX)
 
+dap.experts.zl = ProtoExpert.new("cmsis_dap.zero_length", "Zero length", expert.group.MALFORMED, expert.severity.WARN)
+dap.experts.lost = ProtoExpert.new("cmsis_dap.packet_lost", "Relative packet lost", expert.group.PROTOCOL, expert.severity.WARN)
+
 function dissect_response(buffer, tree)
    tree:add( dap.fields.res_st, buffer(0, 1))
    return names.response[buffer(0, 1):le_uint()]
@@ -267,7 +270,10 @@ function dissect_host_status(is_request, buffer, tree)
       tree:add_le( dap.fields.hs_status, buffer(1, 1))
       return names.led[buffer(0, 1):le_uint()]
    else
-      -- TODO: add expert info
+      tree:add_le( dap.fields.len, buffer(0, 1))
+      if 0 ~= buffer(0, 1):le_uint() then
+         tree:add_proto_expert_info(dap.experts.zl)
+      end
       return ""
    end
 end
@@ -334,13 +340,29 @@ function parse_out_transfer(cnt, buffer, tree)
    return text
 end
 
-function parse_in_transfer(cnt, buffer, tree)
-   local ack = buffer(0, 1):le_uint()
+function dissect_transfer(is_request, buffer, tree, convinf)
+   if is_request then
+      tree:add_le( dap.fields.dap_index, buffer(0, 1))
+      tree:add_le( dap.fields.xfer_cnt, buffer(1, 1))
+      local cnt = buffer(1, 1):le_uint()
+      local text = parse_out_transfer(cnt, buffer(2), tree:add( dap.fields.xfer, buffer(2)))
+      return tostring(cnt) .. " word(s) " .. text
+   else
+      tree:add_le( dap.fields.xfer_cnt, buffer(0, 1))
+      local cnt = buffer(0, 1):le_uint()
+      local ack = bit.band(buffer(1, 1):le_uint(), 0x7)
+      local subtree = tree:add_le(dap.fields.xfer_rsp, buffer(1, 1))
+      subtree:add_le(dap.fields.xfer_ack, buffer(1, 1))
+      subtree:add_le(dap.fields.xfer_perr, buffer(1, 1))
+      subtree:add_le(dap.fields.xfer_miss, buffer(1, 1))
 
-   local subtree = tree:add_le(dap.fields.xfer_rsp, buffer(0, 1))
-   subtree:add_le(dap.fields.xfer_ack, buffer(0, 1))
-   subtree:add_le(dap.fields.xfer_perr, buffer(0, 1))
-   subtree:add_le(dap.fields.xfer_miss, buffer(0, 1))
+      local pos = 2
+      while pos < buffer:len() do
+         tree:add_le(dap.fields.xfer_rdat, buffer(pos, 4))
+         pos = pos + 4
+      end
+      return names.ack[ack] .. " " .. tostring(cnt) .. " word(s)"
+   end
 end
 
 function dissect_transfer_block(is_request, buffer, tree, convinf)
@@ -402,10 +424,7 @@ function dissect_dap_delay(is_request, buffer, tree)
 end
 
 function dissect_dap_reset_target(is_request, buffer, tree)
-   if is_request then
-      -- TODO: add expert info
-      return ""
-   else
+   if false == is_request then
       text = dissect_response(buffer, tree)
       tree:add_le( dap.fields.execute, buffer(1, 1))
       return text
@@ -420,16 +439,15 @@ function dissect_swj_pins(is_request, buffer, tree)
       subtree:add_le( dap.fields.swj_tdi, buffer(0, 1))
       subtree:add_le( dap.fields.swj_tdo, buffer(0, 1))
       subtree:add_le( dap.fields.swj_ntrst, buffer(0, 1))
-      subtree:add_le( dap.fields.swj_nsrst, buffer(0, 1))
+      subtree:add_le( dap.fields.swj_nreset, buffer(0, 1))
       local subtree = tree:add_le( dap.fields.swj_select, buffer(1, 1))
       subtree:add_le( dap.fields.swj_tck, buffer(1, 1))
       subtree:add_le( dap.fields.swj_tms, buffer(1, 1))
       subtree:add_le( dap.fields.swj_tdi, buffer(1, 1))
       subtree:add_le( dap.fields.swj_tdo, buffer(1, 1))
       subtree:add_le( dap.fields.swj_ntrst, buffer(1, 1))
-      subtree:add_le( dap.fields.swj_nsrst, buffer(1, 1))
+      subtree:add_le( dap.fields.swj_nreset, buffer(1, 1))
       tree:add_le( dap.fields.swj_wait, buffer(2, 4))
-      return ""
    else
       local subtree = tree:add_le( dap.fields.swj_input, buffer(0, 1))
       subtree:add_le( dap.fields.swj_tck, buffer(0, 1))
@@ -437,8 +455,9 @@ function dissect_swj_pins(is_request, buffer, tree)
       subtree:add_le( dap.fields.swj_tdi, buffer(0, 1))
       subtree:add_le( dap.fields.swj_tdo, buffer(0, 1))
       subtree:add_le( dap.fields.swj_ntrst, buffer(0, 1))
-      subtree:add_le( dap.fields.swj_nsrst, buffer(0, 1))
+      subtree:add_le( dap.fields.swj_nreset, buffer(0, 1))
    end
+   return ""
 end
 
 function dissect_swj_clk(is_request, buffer, tree)
@@ -479,7 +498,10 @@ function dap.dissector(buffer, pinfo, tree)
    local dev_adr = usb_fields.device_address().value
    local is_request = (usb_fields.endpointdir().value == 0)
 
-   local seq_num = -1
+   local subtree = tree:add(dap, buffer(), "CMSIS-DAP")
+   local cmd = buffer(0, 1):le_uint()
+
+   local seq_num = nil
    if pinfo.visited == false then
       if convlist[dev_adr] == nil then
          convlist[dev_adr] = {}
@@ -493,29 +515,53 @@ function dap.dissector(buffer, pinfo, tree)
          seq_num = #convlist[dev_adr].req
          convlist[dev_adr].seq[pinfo.number] = seq_num
          convlist[dev_adr].inf[seq_num] = {}
+         convlist[dev_adr].inf[seq_num].cmd = cmd
       else
-         table.insert(convlist[dev_adr].res, pinfo.number)
-         seq_num = #convlist[dev_adr].res
-         convlist[dev_adr].seq[pinfo.number] = seq_num
+         local tentative_num = #convlist[dev_adr].res + 1
+         -- Search the same command
+         local num_of_reqs = #convlist[dev_adr].req
+         while tentative_num <= num_of_reqs do
+            if cmd == convlist[dev_adr].inf[tentative_num].cmd then
+               break
+            end
+            tentative_num = tentative_num + 1
+         end
+         if tentative_num <= num_of_reqs then
+            table.insert(convlist[dev_adr].res, pinfo.number)
+            seq_num = #convlist[dev_adr].res
+            if cmd == convlist[dev_adr].inf[seq_num].cmd then
+               convlist[dev_adr].seq[pinfo.number] = seq_num
+            else
+               -- The response packet lost
+               convlist[dev_adr].seq[pinfo.number] = -1
+               convlist[dev_adr].seq[convlist[dev_adr].req[seq_num]] = -1
+            end
+         else
+            -- The request packet lost
+            convlist[dev_adr].seq[pinfo.number] = -1
+         end
       end
    else
-      if is_request then
-         seq_num = convlist[dev_adr].seq[pinfo.number]
-      else
-         seq_num = convlist[dev_adr].seq[pinfo.number]
+      seq_num = convlist[dev_adr].seq[pinfo.number]
+      if seq_num < 0 then
+         seq_num = nil
       end
    end
+   if nil == seq_num then
+      subtree:add_proto_expert_info( dap.experts.lost)
+   end
 
-   local subtree = tree:add(dap, buffer(), "CMSIS-DAP")
-   local cmd = buffer(0, 1):le_uint()
+   local info_text = ""
    if is_request then
       info_text = names.command[cmd] .. " Request "
-      if convlist[dev_adr].res[seq_num] ~= nil then
+      if seq_num ~= nil or convlist[dev_adr].res[seq_num] ~= nil then
          subtree:add( dap.fields.res, convlist[dev_adr].res[seq_num])
       end
    else
       info_text = names.command[cmd] .. " Response "
-      subtree:add( dap.fields.req, convlist[dev_adr].req[seq_num])
+      if seq_num ~= nil then 
+         subtree:add( dap.fields.req, convlist[dev_adr].req[seq_num])
+      end
    end
 
    subtree:add_le( dap.fields.cmd, buffer(0, 1))
@@ -530,19 +576,7 @@ function dap.dissector(buffer, pinfo, tree)
    elseif cmd == vals.command.DAP_TRANSFER_CONFIGURE then
       info_text = info_text .. dissect_transfer_configure(is_request, buffer(1), subtree)
    elseif cmd == vals.command.DAP_TRANSFER then
-      if is_request then
-         subtree:add_le( dap.fields.dap_index, buffer(1, 1))
-         subtree:add_le( dap.fields.xfer_cnt, buffer(2, 1))
-         local cnt = buffer(2, 1):le_uint()
-         local text = parse_out_transfer(cnt, buffer(3), subtree:add( dap.fields.xfer, buffer(3)))
-         info_text = info_text .. tostring(cnt) .. " word(s) " .. text
-      else
-         subtree:add_le( dap.fields.xfer_cnt, buffer(1, 1))
-         local cnt = buffer(1, 1):le_uint()
-         local ack = bit.band(buffer(2, 1):le_uint(), 0x7)
-         local text = parse_in_transfer(cnt, buffer(2), subtree)
-         info_text = info_text .. names.ack[ack] .. " " .. tostring(cnt) .. " word(s)"
-      end
+      info_text = info_text .. dissect_transfer(is_request, buffer(1), subtree, convlist[dev_adr].inf[seq_num])
    elseif cmd == vals.command.DAP_TRANSFER_BLOCK then
       info_text = info_text .. dissect_transfer_block(is_request, buffer(1), subtree, convlist[dev_adr].inf[seq_num])
    elseif cmd == vals.command.DAP_TRANSFER_ABORT then
@@ -552,9 +586,9 @@ function dap.dissector(buffer, pinfo, tree)
    elseif cmd == vals.command.DAP_DELAY then
       info_text = info_text .. dissect_dap_delay(is_request, buffer(1), subtree)
    elseif cmd == vals.command.DAP_RESET_TARGET then
-      info_text = dissect_dap_reset_target(is_request, buffer(1), tree)
+      info_text = info_text .. dissect_dap_reset_target(is_request, buffer(1), tree)
    elseif cmd == vals.command.DAP_SWJ_PINS then
-      info_text = dissect_swj_pins(is_request, buffer(1), tree)
+      info_text = info_text .. dissect_swj_pins(is_request, buffer(1), tree)
    elseif cmd == vals.command.DAP_SWJ_CLOCK then
       info_text = info_text .. dissect_swj_clk(is_request, buffer(1), subtree)
    elseif cmd == vals.command.DAP_SWJ_SEQUENCE then

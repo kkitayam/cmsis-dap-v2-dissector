@@ -306,9 +306,19 @@ end
 function parse_out_transfer(cnt, buffer, tree)
    local pos = 0
    local text = ""
+   local prev_is_write = -1 -- previous access. 1:read 0:write
+   local is_write = -1
+   local consec = 0 -- the number of consecutive access
    for i = 1, cnt do
+      if prev_is_write ~= is_write then
+         if consec > 1 then
+            text = text .. tostring(consec)
+         end
+         consec = 0
+      end
+
       local tr = buffer(pos, 1):le_uint()
-      local is_write = (bit.band(tr, 0x2) == 0)
+      is_write = (bit.band(tr, 0x2) == 0)
       local is_match = (bit.band(tr, 0x10) ~= 0)
       local is_mask = (bit.band(tr, 0x20) ~= 0)
 
@@ -324,9 +334,13 @@ function parse_out_transfer(cnt, buffer, tree)
       if is_write then
          tree:add_le(dap.fields.xfer_wdat, buffer(pos, 4))
          pos = pos + 4
-         text = text .. "W"
+         if prev_is_write ~= is_write then
+            text = text .. "W"
+         end
       else
-         text = text .. "R"
+         if prev_is_write ~= is_write then
+            text = text .. "R"
+         end
       end
       if is_mask then
          tree:add_le(dap.fields.xfer_mskdat, buffer(pos, 4))
@@ -336,6 +350,11 @@ function parse_out_transfer(cnt, buffer, tree)
          tree:add_le(dap.fields.xfer_mchdat, buffer(pos, 4))
          pos = pos + 4
       end
+      consec = consec + 1
+      prev_is_write = is_write
+   end
+   if consec > 1 then
+      text = text .. tostring(consec)
    end
    return text
 end

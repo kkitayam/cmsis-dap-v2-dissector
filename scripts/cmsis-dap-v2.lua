@@ -425,7 +425,7 @@ end
 
 function dissect_write_abort(is_request, buffer, tree)
    if is_request then
-      tree:add_le( dap.fields.index, buffer(0, 1))
+      tree:add_le( dap.fields.dap_index, buffer(0, 1))
       tree:add_le( dap.fields.write_abort, buffer(1, 4))
       return ""
    else

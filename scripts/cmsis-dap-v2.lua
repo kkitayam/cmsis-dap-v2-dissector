@@ -425,7 +425,7 @@ end
 
 function dissect_write_abort(is_request, buffer, tree)
    if is_request then
-      tree:add_le( dap.fields.index, buffer(0, 1))
+      tree:add_le( dap.fields.dap_index, buffer(0, 1))
       tree:add_le( dap.fields.write_abort, buffer(1, 4))
       return ""
    else
@@ -571,13 +571,17 @@ function dap.dissector(buffer, pinfo, tree)
    end
 
    local info_text = ""
+   local command = "Unknown"
+   if names.command[cmd] ~= nil then
+        command = names.command[cmd]
+   end
    if is_request then
-      info_text = names.command[cmd] .. " Request "
+      info_text = command .. " Request "
       if seq_num ~= nil or convlist[dev_adr].res[seq_num] ~= nil then
          subtree:add( dap.fields.res, convlist[dev_adr].res[seq_num])
       end
    else
-      info_text = names.command[cmd] .. " Response "
+      info_text = command .. " Response "
       if seq_num ~= nil then 
          subtree:add( dap.fields.req, convlist[dev_adr].req[seq_num])
       end

@@ -2,126 +2,126 @@ local convlist = {}
 local dap = Proto("USBDAP", "USB CMSIS-DAP protocol")
 
 local usb_fields = {
-   transfer_type = Field.new("usb.transfer_type"),
-   endpointdir = Field.new("usb.endpoint_address.direction"),
-   device_address = Field.new("usb.device_address"),
+  transfer_type = Field.new("usb.transfer_type"),
+  endpointdir = Field.new("usb.endpoint_address.direction"),
+  device_address = Field.new("usb.device_address"),
 }
 
 local vals = {
-   id = {
-      VENDOR_NAME = 1,
-      PRODUCT_NAME = 2,
-      SERIAL_NUMBER = 3,
-      CMSIS_DAP_PROTOCOL_VERSION = 4,
-      TARGET_DEVICE_VENDOR = 5,
-      TARGET_DEVICE_NAME = 6,
-      TARGET_BOARD_VENDOR = 7,
-      TARGET_BOARD_NAME = 8,
-      PRODUCT_FIRMWARE_VERSION = 9,
-      CAPABILITIES = 0xF0,
-      TEST_DOMAIN_TIMER_= 0xF1,
-      UART_RECEIVE_BUFFER_SIZE = 0xFB,
-      UART_TRANSMIT_BUFFER_SIZE = 0xFC,
-      SWO_TRACE_BUFFER_SIZE = 0xFD,
-      PACKET_COUNT = 0xFE,
-      PACKET_SIZE = 0xFF,
-   },
-   command = {
-      DAP_INFO                = 0,
-      DAP_HOST_STATUS         = 1,
-      DAP_CONNECT             = 2,
-      DAP_DISCONNECT          = 3,
-      DAP_TRANSFER_CONFIGURE  = 4,
-      DAP_TRANSFER            = 5,
-      DAP_TRANSFER_BLOCK      = 6,
-      DAP_TRANSFER_ABORT      = 7,
-      DAP_WRITE_ABORT         = 8,
-      DAP_DELAY               = 9,
-      DAP_RESET_TARGET        = 10,
-      DAP_SWJ_PINS            = 16,
-      DAP_SWJ_CLOCK           = 17,
-      DAP_SWJ_SEQUENCE        = 18,
-      DAP_SWD_CONFIGURE       = 19,
-      DAP_JTAG_SEQUENCE       = 20,
-      DAP_JTAG_CONFIGURE      = 21,
-      DAP_JTAG_IDCODE         = 22,
-      DAP_SWO_TRANSPORT       = 23,
-      DAP_SWO_MODE            = 24,
-      DAP_SWO_BAUDRATE        = 25,
-      DAP_SWO_CONTROL         = 26,
-      DAP_SWO_STATUS          = 27,
-      DAP_SWO_DATA            = 28,
-      DAP_SWD_SEQUENCE        = 29,
-      DAP_SWD_EXTENDED_STATUS = 30,
-      DAP_UART_TRANSPORT      = 31,
-      DAP_UART_CONFIGURE      = 32,
-      DAP_UART_TRANSFER       = 33,
-      DAP_UART_CONTROL        = 34,
-      DAP_UART_STATUS         = 35,
-      DAP_QUEUE_COMMANDS      = 126,
-      DAP_EXECUTE_COMMANDS    = 127
-   },
+  id = {
+    VENDOR_NAME = 1,
+    PRODUCT_NAME = 2,
+    SERIAL_NUMBER = 3,
+    CMSIS_DAP_PROTOCOL_VERSION = 4,
+    TARGET_DEVICE_VENDOR = 5,
+    TARGET_DEVICE_NAME = 6,
+    TARGET_BOARD_VENDOR = 7,
+    TARGET_BOARD_NAME = 8,
+    PRODUCT_FIRMWARE_VERSION = 9,
+    CAPABILITIES = 0xF0,
+    TEST_DOMAIN_TIMER_= 0xF1,
+    UART_RECEIVE_BUFFER_SIZE = 0xFB,
+    UART_TRANSMIT_BUFFER_SIZE = 0xFC,
+    SWO_TRACE_BUFFER_SIZE = 0xFD,
+    PACKET_COUNT = 0xFE,
+    PACKET_SIZE = 0xFF,
+  },
+  command = {
+    DAP_INFO                = 0,
+    DAP_HOST_STATUS         = 1,
+    DAP_CONNECT             = 2,
+    DAP_DISCONNECT          = 3,
+    DAP_TRANSFER_CONFIGURE  = 4,
+    DAP_TRANSFER            = 5,
+    DAP_TRANSFER_BLOCK      = 6,
+    DAP_TRANSFER_ABORT      = 7,
+    DAP_WRITE_ABORT         = 8,
+    DAP_DELAY               = 9,
+    DAP_RESET_TARGET        = 10,
+    DAP_SWJ_PINS            = 16,
+    DAP_SWJ_CLOCK           = 17,
+    DAP_SWJ_SEQUENCE        = 18,
+    DAP_SWD_CONFIGURE       = 19,
+    DAP_JTAG_SEQUENCE       = 20,
+    DAP_JTAG_CONFIGURE      = 21,
+    DAP_JTAG_IDCODE         = 22,
+    DAP_SWO_TRANSPORT       = 23,
+    DAP_SWO_MODE            = 24,
+    DAP_SWO_BAUDRATE        = 25,
+    DAP_SWO_CONTROL         = 26,
+    DAP_SWO_STATUS          = 27,
+    DAP_SWO_DATA            = 28,
+    DAP_SWD_SEQUENCE        = 29,
+    DAP_SWD_EXTENDED_STATUS = 30,
+    DAP_UART_TRANSPORT      = 31,
+    DAP_UART_CONFIGURE      = 32,
+    DAP_UART_TRANSFER       = 33,
+    DAP_UART_CONTROL        = 34,
+    DAP_UART_STATUS         = 35,
+    DAP_QUEUE_COMMANDS      = 126,
+    DAP_EXECUTE_COMMANDS    = 127,
+  },
 }
 
 local names = {
-   id = {
-      [0x01] = "Vendor Name",
-      [0x02] = "Product Name",
-      [0x03] = "Serial Number",
-      [0x04] = "CMSIS-DAP Protocol Version",
-      [0x05] = "Target Device Vendor",
-      [0x06] = "Target Device Name",
-      [0x07] = "Target Board Vendor",
-      [0x08] = "Target Board Name",
-      [0x09] = "Product Firmware Version",
-      [0xF0] = "Capabilities",
-      [0xF1] = "Test Domain Timer",
-      [0xFB] = "UART Receive Buffer Size",
-      [0xFC] = "UART Transmit Buffer Size",
-      [0xFD] = "SWO Trace Buffer Size",
-      [0xFE] = "Packet Count",
-      [0xFF] = "Packet Size"
-   },
-   command = {
-      [ 0] = "Info",
-      [ 1] = "HostStatus",
-      [ 2] = "Connect",
-      [ 3] = "Disconnect",
-      [ 4] = "TransferConfigure",
-      [ 5] = "Transfer",
-      [ 6] = "TransferBlock",
-      [ 7] = "TransferAbort",
-      [ 8] = "WriteABORT",
-      [ 9] = "Delay",
-      [10] = "ResetTarget",
-      [16] = "SWJ_Pins",
-      [17] = "SWJ_Clock",
-      [18] = "SWJ_Sequence",
-      [19] = "SWD_Configure",
-      [20] = "JTAG_Sequence",
-      [21] = "JTAG_Configure",
-      [22] = "JTAG_IDCOODE",
-      [23] = "SWO_Transport",
-      [24] = "SWO_Mode",
-      [25] = "SWO_Baudrate",
-      [26] = "SWO_Control",
-      [27] = "SWO_Status",
-      [28] = "SWO_Data",
-      [29] = "SWD_Sequence",
-      [30] = "SWO_ExtendedStatus",
-      [31] = "UART_Transport",
-      [32] = "UART_Configure",
-      [33] = "UART_Transfer",
-      [34] = "UART_Control",
-      [35] = "UART_Status",
-      [126] = "QueueCommands",
-      [127] = "ExecuteCommands"
-   },
-   response = {[0] = "DAP_OK", [0xFF] = "DAP_ERROR"},
-   port = {[0] = "Default", [1] = "SWD", [2] = "JTAG"},
-   ack = {[1] = "OK", [2] = "WAIT", [3] = "FAULT", [4] = "NO_ACKT"},
-   led = {[0] = "Connect", [1] = "Running"},
-   imp = {[0] = "Not implemented", [1] = "Implemented"},
+  id = {
+    [0x01] = "Vendor Name",
+    [0x02] = "Product Name",
+    [0x03] = "Serial Number",
+    [0x04] = "CMSIS-DAP Protocol Version",
+    [0x05] = "Target Device Vendor",
+    [0x06] = "Target Device Name",
+    [0x07] = "Target Board Vendor",
+    [0x08] = "Target Board Name",
+    [0x09] = "Product Firmware Version",
+    [0xF0] = "Capabilities",
+    [0xF1] = "Test Domain Timer",
+    [0xFB] = "UART Receive Buffer Size",
+    [0xFC] = "UART Transmit Buffer Size",
+    [0xFD] = "SWO Trace Buffer Size",
+    [0xFE] = "Packet Count",
+    [0xFF] = "Packet Size",
+  },
+  command = {
+    [ 0] = "Info",
+    [ 1] = "HostStatus",
+    [ 2] = "Connect",
+    [ 3] = "Disconnect",
+    [ 4] = "TransferConfigure",
+    [ 5] = "Transfer",
+    [ 6] = "TransferBlock",
+    [ 7] = "TransferAbort",
+    [ 8] = "WriteABORT",
+    [ 9] = "Delay",
+    [10] = "ResetTarget",
+    [16] = "SWJ_Pins",
+    [17] = "SWJ_Clock",
+    [18] = "SWJ_Sequence",
+    [19] = "SWD_Configure",
+    [20] = "JTAG_Sequence",
+    [21] = "JTAG_Configure",
+    [22] = "JTAG_IDCOODE",
+    [23] = "SWO_Transport",
+    [24] = "SWO_Mode",
+    [25] = "SWO_Baudrate",
+    [26] = "SWO_Control",
+    [27] = "SWO_Status",
+    [28] = "SWO_Data",
+    [29] = "SWD_Sequence",
+    [30] = "SWO_ExtendedStatus",
+    [31] = "UART_Transport",
+    [32] = "UART_Configure",
+    [33] = "UART_Transfer",
+    [34] = "UART_Control",
+    [35] = "UART_Status",
+    [126] = "QueueCommands",
+    [127] = "ExecuteCommands",
+  },
+  response = {[0] = "DAP_OK", [0xFF] = "DAP_ERROR"},
+  port = {[0] = "Default", [1] = "SWD", [2] = "JTAG"},
+  ack = {[1] = "OK", [2] = "WAIT", [3] = "FAULT", [4] = "NO_ACKT"},
+  led = {[0] = "Connect", [1] = "Running"},
+  imp = {[0] = "Not implemented", [1] = "Implemented"},
 }
 
 dap.fields.req = ProtoField.framenum("cmsis_dap.request", "Request", base.NONE, frametype.REQUEST)
@@ -138,8 +138,7 @@ dap.fields.dev_vendor = ProtoField.string("cmsis_dap.info.target.device.vendor",
 dap.fields.dev_name = ProtoField.string("cmsis_dap.info.target.device.name", "Target Device Name")
 dap.fields.board_vendor = ProtoField.string("cmsis_dap.info.target.board.vendor", "Target Board Vendor")
 dap.fields.board_name = ProtoField.string("cmsis_dap.info.target.board.name", "Target Board Name")
-dap.fields.fw_version = ProtoField.string("cmsis_dap.info.target.board.name", "Product Firmware Version")
-dap.fields.fw_version = ProtoField.string("cmsis_dap.info.target.board.name", "Product Firmware Version")
+dap.fields.fw_version = ProtoField.string("cmsis_dap.info.firmware.version", "Product Firmware Version")
 dap.fields.caps = ProtoField.uint8("cmsis_dap.info.caps", "Capabilities", base.HEX)
 dap.fields.impswd = ProtoField.uint8("cmsis_dap.info.swd", "SWD", base.HEX, names.imp, 0x1)
 dap.fields.impjtag = ProtoField.uint8("cmsis_dap.info.jtag", "JTAG", base.HEX, names.imp, 0x2)
@@ -150,6 +149,9 @@ dap.fields.tmr = ProtoField.uint8("cmsis_dap.info.timer", "Test Domain Timer", b
 dap.fields.swostm = ProtoField.uint8("cmsis_dap.info.swo_streaming", "SWO Streaming Trace", base.HEX, names.imp, 0x40)
 dap.fields.ua = ProtoField.uint8("cmsis_dap.info.uart", "UART Communication Port", base.HEX, names.imp, 0x80)
 dap.fields.usbcom = ProtoField.uint8("cmsis_dap.info.usb_com", "USB COM Port", base.HEX, names.imp, 0x1)
+dap.fields.uarxbufsz = ProtoField.uint32("cmsis_dap.info.uart.rx_bufsz", "UART Receive Buffer Size")
+dap.fields.uatxbufsz = ProtoField.uint32("cmsis_dap.info.uart.tx_bufsz", "UART Transmit Buffer Size")
+dap.fields.swobufsz = ProtoField.uint32("cmsis_dap.info.swo_bufsz", "SWO Buffer Size")
 dap.fields.pktcnt = ProtoField.uint8("cmsis_dap.info.packet.count", "Packet Count")
 dap.fields.pktsz = ProtoField.uint16("cmsis_dap.info.packet.size", "Packet Size")
 dap.fields.hs_type = ProtoField.uint8("cmsis_dap.host_status.type", "Type", base.HEX, names.led)
@@ -200,465 +202,483 @@ dap.fields.xfer_rdat = ProtoField.uint32("cmsis_dap.transfer.read.data", "Read",
 dap.experts.zl = ProtoExpert.new("cmsis_dap.zero_length", "Zero length", expert.group.MALFORMED, expert.severity.WARN)
 dap.experts.lost = ProtoExpert.new("cmsis_dap.packet_lost", "Relative packet lost", expert.group.PROTOCOL, expert.severity.WARN)
 
-function dissect_response(buffer, tree)
-   tree:add( dap.fields.res_st, buffer(0, 1))
-   return names.response[buffer(0, 1):le_uint()]
+local function dissect_response(buffer, tree)
+  tree:add(dap.fields.res_st, buffer(0, 1))
+  return names.response[buffer(0, 1):le_uint()]
 end
 
-function dissect_info(is_request, buffer, tree, convinf)
-   if is_request then
-      local id = buffer(0,1):le_uint()
-      tree:add_le( dap.fields.id, buffer(0, 1))
-      convinf.id = id
-      return names.id[id]
-   end
+local function dissect_info(is_request, buffer, tree, convinf)
+  if is_request then
+    local id = buffer(0,1):le_uint()
+    tree:add_le(dap.fields.id, buffer(0, 1))
+    convinf.id = id
+    return names.id[id]
+  end
 
-   tree:add_le( dap.fields.len, buffer(0, 1))
-   local id = convinf.id
-   local len = buffer(0,1):le_uint()
-   if 0 == len then
-      return names.id[id]
-   end
-   if vals.id.VENDOR_NAME == id then
-      tree:add( dap.fields.vendor, buffer(1))
-   elseif vals.id.PRODUCT_NAME == id then
-      tree:add( dap.fields.product, buffer(1))
-   elseif vals.id.SERIAL_NUMBER == id then
-      tree:add( dap.fields.serial, buffer(1))
-   elseif vals.id.CMSIS_DAP_PROTOCOL_VERSION == id then
-      tree:add( dap.fields.dap_ver, buffer(1))
-   elseif vals.id.TARGET_DEVICE_VENDOR == id then
-      tree:add( dap.fields.dev_vendor, buffer(1))
-   elseif vals.id.TARGET_DEVICE_NAME == id then
-      tree:add( dap.fields.dev_name, buffer(1))
-   elseif vals.id.TARGET_BOARD_VENDOR == id then
-      tree:add( dap.fields.board_vendor, buffer(1))
-   elseif vals.id.TARGET_BOARD_NAME == id then
-      tree:add( dap.fields.board_name, buffer(1))
-   elseif vals.id.PRODUCT_FIRMWARE_VERSION == id then
-      tree:add( dap.fields.fw_version, buffer(1))
-   elseif vals.id.CAPABILITIES == id then
-      local subtree = tree:add_le( dap.fields.caps, buffer(1))
-      if len > 0 then
-         subtree:add_le( dap.fields.impswd, buffer(1, 1))
-         subtree:add_le( dap.fields.impjtag, buffer(1, 1))
-         subtree:add_le( dap.fields.swoua, buffer(1, 1))
-         subtree:add_le( dap.fields.swoman, buffer(1, 1))
-         subtree:add_le( dap.fields.atomic, buffer(1, 1))
-         subtree:add_le( dap.fields.tmr, buffer(1, 1))
-         subtree:add_le( dap.fields.swostm, buffer(1, 1))
-         subtree:add_le( dap.fields.ua, buffer(1, 1))
+  tree:add_le(dap.fields.len, buffer(0, 1))
+  local id = convinf.id
+  local len = buffer(0,1):le_uint()
+
+  if 0 == len then
+    return names.id[id]
+  end
+
+  if vals.id.VENDOR_NAME == id then
+    tree:add(dap.fields.vendor, buffer(1))
+  elseif vals.id.PRODUCT_NAME == id then
+    tree:add(dap.fields.product, buffer(1))
+  elseif vals.id.SERIAL_NUMBER == id then
+    tree:add(dap.fields.serial, buffer(1))
+  elseif vals.id.CMSIS_DAP_PROTOCOL_VERSION == id then
+    tree:add(dap.fields.dap_ver, buffer(1))
+  elseif vals.id.TARGET_DEVICE_VENDOR == id then
+    tree:add(dap.fields.dev_vendor, buffer(1))
+  elseif vals.id.TARGET_DEVICE_NAME == id then
+    tree:add(dap.fields.dev_name, buffer(1))
+  elseif vals.id.TARGET_BOARD_VENDOR == id then
+    tree:add(dap.fields.board_vendor, buffer(1))
+  elseif vals.id.TARGET_BOARD_NAME == id then
+    tree:add(dap.fields.board_name, buffer(1))
+  elseif vals.id.PRODUCT_FIRMWARE_VERSION == id then
+    tree:add(dap.fields.fw_version, buffer(1))
+  elseif vals.id.CAPABILITIES == id then
+    local subtree = tree:add_le(dap.fields.caps, buffer(1))
+    if len > 0 then
+      subtree:add_le(dap.fields.impswd, buffer(1, 1))
+      subtree:add_le(dap.fields.impjtag, buffer(1, 1))
+      subtree:add_le(dap.fields.swoua, buffer(1, 1))
+      subtree:add_le(dap.fields.swoman, buffer(1, 1))
+      subtree:add_le(dap.fields.atomic, buffer(1, 1))
+      subtree:add_le(dap.fields.tmr, buffer(1, 1))
+      subtree:add_le(dap.fields.swostm, buffer(1, 1))
+      subtree:add_le(dap.fields.ua, buffer(1, 1))
+    end
+    if len > 1 then
+      subtree:add_le(dap.fields.usbcom, buffer(2, 1))
+    end
+  elseif vals.id.TEST_DOMAIN_TIMER_ == id then
+
+  elseif vals.id.UART_RECEIVE_BUFFER_SIZE == id then
+    tree:add(dap.fields.uarxbufsz, buffer(1, 4))
+  elseif vals.id.UART_TRANSMIT_BUFFER_SIZE == id then
+    tree:add(dap.fields.uatxbufsz, buffer(1, 4))
+  elseif vals.id.SWO_TRACE_BUFFER_SIZE == id then
+    tree:add(dap.fields.swobufsz, buffer(1, 4))  
+  elseif vals.id.PACKET_COUNT == id then
+    tree:add_le(dap.fields.pktcnt, buffer(1, 1))
+  elseif vals.id.PACKET_SIZE == id then
+    tree:add_le(dap.fields.pktsz, buffer(1, 2))
+  end
+  
+  return names.id[id]
+end
+
+local function dissect_host_status(is_request, buffer, tree)
+  if is_request then
+    tree:add_le(dap.fields.hs_type, buffer(0, 1))
+    tree:add_le(dap.fields.hs_status, buffer(1, 1))
+    return names.led[buffer(0, 1):le_uint()]
+  else
+    tree:add_le(dap.fields.len, buffer(0, 1))
+    if 0 ~= buffer(0, 1):le_uint() then
+      tree:add_proto_expert_info(dap.experts.zl)
+    end
+    return ""
+  end
+end
+
+local function dissect_dap_connect(is_request, buffer, tree)
+  tree:add_le(dap.fields.port, buffer(0, 1))
+  return names.port[buffer(0, 1):le_uint()]
+end
+
+local function dissect_dap_disconnect(is_request, buffer, tree)
+  if is_request then
+    -- TODO: Add expert info if necessary
+    return ""
+  else
+    return dissect_response(buffer, tree)
+  end
+end
+
+local function dissect_transfer_configure(is_request, buffer, tree)
+  if is_request then
+    tree:add_le(dap.fields.xfer_ic, buffer(0, 1))
+    tree:add_le(dap.fields.xfer_wr, buffer(1, 2))
+    tree:add_le(dap.fields.xfer_mr, buffer(3, 2))
+    return ""
+  else
+    return dissect_response(buffer, tree)
+  end
+end
+
+local function parse_out_transfer(cnt, buffer, tree)
+  local pos = 0
+  local text = ""
+  local prev_is_write = -1 -- Previous access. 1:read 0:write
+  local is_write = -1
+  local consec = 0 -- Consecutive access count
+  
+  for i = 1, cnt do
+    if prev_is_write ~= is_write then
+      if consec > 1 then
+        text = text .. tostring(consec)
       end
-      if len > 1 then
-         subtree:add_le( dap.fields.usbcom, buffer(2, 1))
-      end
-   elseif vals.id.TEST_DOMAIN_TIMER_== id then
-   elseif vals.id.UART_RECEIVE_BUFFER_SIZE == id then
-   elseif vals.id.UART_TRANSMIT_BUFFER_SIZE == id then
-   elseif vals.id.SWO_TRACE_BUFFER_SIZE == id then
-   elseif vals.id.PACKET_COUNT == id then
-      tree:add_le( dap.fields.pktcnt, buffer(1, 1))
-   elseif vals.id.PACKET_SIZE == id then
-      tree:add_le( dap.fields.pktsz, buffer(1, 2))
-   end
-   return names.id[id]
-end
+      consec = 0
+    end
 
-function dissect_host_status(is_request, buffer, tree)
-   if is_request then
-      tree:add_le( dap.fields.hs_type, buffer(0, 1))
-      tree:add_le( dap.fields.hs_status, buffer(1, 1))
-      return names.led[buffer(0, 1):le_uint()]
-   else
-      tree:add_le( dap.fields.len, buffer(0, 1))
-      if 0 ~= buffer(0, 1):le_uint() then
-         tree:add_proto_expert_info(dap.experts.zl)
-      end
-      return ""
-   end
-end
+    local tr = buffer(pos, 1):le_uint()
+    is_write = (bit.band(tr, 0x2) == 0)
+    local is_match = (bit.band(tr, 0x10) ~= 0)
+    local is_mask = (bit.band(tr, 0x20) ~= 0)
 
-function dissect_dap_connect(is_request, buffer, tree)
-   tree:add_le( dap.fields.port, buffer(0, 1))
-   return names.port[buffer(0, 1):le_uint()]
-end
+    local subtree = tree:add_le(dap.fields.xfer_req, buffer(pos, 1))
+    subtree:add_le(dap.fields.xfer_apndp, buffer(pos, 1))
+    subtree:add_le(dap.fields.xfer_rnw, buffer(pos, 1))
+    subtree:add_le(dap.fields.xfer_a23, buffer(pos, 1))
+    subtree:add_le(dap.fields.xfer_match, buffer(pos, 1))
+    subtree:add_le(dap.fields.xfer_mask, buffer(pos, 1))
+    subtree:add_le(dap.fields.xfer_ts, buffer(pos, 1))
+    pos = pos + 1
 
-function dissect_dap_disconnect(is_request, buffer, tree)
-   if is_request then
-      -- TODO: add expert info
-      return ""
-   else
-      return dissect_response(buffer, tree)
-   end
-end
-
-function dissect_transfer_configure(is_request, buffer, tree)
-   if is_request then
-      tree:add_le( dap.fields.xfer_ic, buffer(0, 1))
-      tree:add_le( dap.fields.xfer_wr, buffer(1, 2))
-      tree:add_le( dap.fields.xfer_mr, buffer(3, 2))
-      return ""
-   else
-      return dissect_response(buffer, tree)
-   end
-end
-
-function parse_out_transfer(cnt, buffer, tree)
-   local pos = 0
-   local text = ""
-   local prev_is_write = -1 -- previous access. 1:read 0:write
-   local is_write = -1
-   local consec = 0 -- the number of consecutive access
-   for i = 1, cnt do
+    if is_write then
+      tree:add_le(dap.fields.xfer_wdat, buffer(pos, 4))
+      pos = pos + 4
       if prev_is_write ~= is_write then
-         if consec > 1 then
-            text = text .. tostring(consec)
-         end
-         consec = 0
+        text = text .. "W"
       end
-
-      local tr = buffer(pos, 1):le_uint()
-      is_write = (bit.band(tr, 0x2) == 0)
-      local is_match = (bit.band(tr, 0x10) ~= 0)
-      local is_mask = (bit.band(tr, 0x20) ~= 0)
-
-      local subtree = tree:add_le(dap.fields.xfer_req, buffer(pos, 1))
-      subtree:add_le(dap.fields.xfer_apndp, buffer(pos, 1))
-      subtree:add_le(dap.fields.xfer_rnw, buffer(pos, 1))
-      subtree:add_le(dap.fields.xfer_a23, buffer(pos, 1))
-      subtree:add_le(dap.fields.xfer_match, buffer(pos, 1))
-      subtree:add_le(dap.fields.xfer_mask, buffer(pos, 1))
-      subtree:add_le(dap.fields.xfer_ts, buffer(pos, 1))
-      pos = pos + 1
-
-      if is_write then
-         tree:add_le(dap.fields.xfer_wdat, buffer(pos, 4))
-         pos = pos + 4
-         if prev_is_write ~= is_write then
-            text = text .. "W"
-         end
-      else
-         if prev_is_write ~= is_write then
-            text = text .. "R"
-         end
+    else
+      if prev_is_write ~= is_write then
+        text = text .. "R"
       end
-      if is_mask then
-         tree:add_le(dap.fields.xfer_mskdat, buffer(pos, 4))
-         pos = pos + 4
-      end
-      if is_match then
-         tree:add_le(dap.fields.xfer_mchdat, buffer(pos, 4))
-         pos = pos + 4
-      end
-      consec = consec + 1
-      prev_is_write = is_write
-   end
-   if consec > 1 then
-      text = text .. tostring(consec)
-   end
-   return text
+    end
+    
+    if is_mask then
+      tree:add_le(dap.fields.xfer_mskdat, buffer(pos, 4))
+      pos = pos + 4
+    end
+    
+    if is_match then
+      tree:add_le(dap.fields.xfer_mchdat, buffer(pos, 4))
+      pos = pos + 4
+    end
+    
+    consec = consec + 1
+    prev_is_write = is_write
+  end
+  
+  if consec > 1 then
+    text = text .. tostring(consec)
+  end
+  
+  return text
 end
 
-function dissect_transfer(is_request, buffer, tree, convinf)
-   if is_request then
-      tree:add_le( dap.fields.dap_index, buffer(0, 1))
-      tree:add_le( dap.fields.xfer_cnt, buffer(1, 1))
-      local cnt = buffer(1, 1):le_uint()
-      local text = parse_out_transfer(cnt, buffer(2), tree:add( dap.fields.xfer, buffer(2)))
-      return tostring(cnt) .. " word(s) " .. text
-   else
-      tree:add_le( dap.fields.xfer_cnt, buffer(0, 1))
-      local cnt = buffer(0, 1):le_uint()
-      local ack = bit.band(buffer(1, 1):le_uint(), 0x7)
-      local subtree = tree:add_le(dap.fields.xfer_rsp, buffer(1, 1))
-      subtree:add_le(dap.fields.xfer_ack, buffer(1, 1))
-      subtree:add_le(dap.fields.xfer_perr, buffer(1, 1))
-      subtree:add_le(dap.fields.xfer_miss, buffer(1, 1))
+local function dissect_transfer(is_request, buffer, tree, convinf)
+  if is_request then
+    tree:add_le(dap.fields.dap_index, buffer(0, 1))
+    tree:add_le(dap.fields.xfer_cnt, buffer(1, 1))
+    local cnt = buffer(1, 1):le_uint()
+    local text = parse_out_transfer(cnt, buffer(2), tree:add(dap.fields.xfer, buffer(2)))
+    return tostring(cnt) .. " word(s) " .. text
+  else
+    tree:add_le(dap.fields.xfer_cnt, buffer(0, 1))
+    local cnt = buffer(0, 1):le_uint()
+    local ack = bit.band(buffer(1, 1):le_uint(), 0x7)
+    local subtree = tree:add_le(dap.fields.xfer_rsp, buffer(1, 1))
+    subtree:add_le(dap.fields.xfer_ack, buffer(1, 1))
+    subtree:add_le(dap.fields.xfer_perr, buffer(1, 1))
+    subtree:add_le(dap.fields.xfer_miss, buffer(1, 1))
 
-      local pos = 2
-      while pos < buffer:len() do
-         tree:add_le(dap.fields.xfer_rdat, buffer(pos, 4))
-         pos = pos + 4
-      end
-      return names.ack[ack] .. " " .. tostring(cnt) .. " word(s)"
-   end
+    local pos = 2
+    while pos < buffer:len() do
+      tree:add_le(dap.fields.xfer_rdat, buffer(pos, 4))
+      pos = pos + 4
+    end
+    return names.ack[ack] .. " " .. tostring(cnt) .. " word(s)"
+  end
 end
 
-function dissect_transfer_block(is_request, buffer, tree, convinf)
-   if is_request then
-      tree:add_le( dap.fields.dap_index, buffer(0, 1))
-      tree:add_le( dap.fields.xfer_blk_cnt, buffer(1, 2))
-      local cnt = buffer(1, 2):le_uint()
-      local is_read = (bit.band(buffer(3, 1):le_uint(), 0x2) ~= 0)
-      local subtree = tree:add_le(dap.fields.xfer_req, buffer(3, 1))
-      subtree:add_le(dap.fields.xfer_apndp, buffer(3, 1))
-      subtree:add_le(dap.fields.xfer_rnw, buffer(3, 1))
-      subtree:add_le(dap.fields.xfer_a23, buffer(3, 1))
-      if is_read then
-         return tostring(cnt) .. " word(s) " .. "Read"
-      end
-      local pos = 4
-      for i = 1, cnt do
-         tree:add_le(dap.fields.xfer_wdat, buffer(pos, 4))
-         pos = pos + 4
-      end
-      return tostring(cnt) .. " word(s) " .. "Write"
-   else
-      tree:add_le( dap.fields.xfer_blk_cnt, buffer(0, 2))
-      local cnt = buffer(0, 2):le_uint()
-      local ack = buffer(2, 1):le_uint()
-      local subtree = tree:add_le( dap.fields.xfer_rsp, buffer(2, 1))
-      subtree:add_le( dap.fields.xfer_ack, buffer(2, 1))
-      subtree:add_le( dap.fields.xfer_perr, buffer(2, 1))
+local function dissect_transfer_block(is_request, buffer, tree, convinf)
+  if is_request then
+    tree:add_le(dap.fields.dap_index, buffer(0, 1))
+    tree:add_le(dap.fields.xfer_blk_cnt, buffer(1, 2))
+    local cnt = buffer(1, 2):le_uint()
+    local is_read = (bit.band(buffer(3, 1):le_uint(), 0x2) ~= 0)
+    local subtree = tree:add_le(dap.fields.xfer_req, buffer(3, 1))
+    subtree:add_le(dap.fields.xfer_apndp, buffer(3, 1))
+    subtree:add_le(dap.fields.xfer_rnw, buffer(3, 1))
+    subtree:add_le(dap.fields.xfer_a23, buffer(3, 1))
+    
+    if is_read then
+      return tostring(cnt) .. " word(s) " .. "Read"
+    end
+    
+    local pos = 4
+    for i = 1, cnt do
+      tree:add_le(dap.fields.xfer_wdat, buffer(pos, 4))
+      pos = pos + 4
+    end
+    return tostring(cnt) .. " word(s) " .. "Write"
+  else
+    tree:add_le(dap.fields.xfer_blk_cnt, buffer(0, 2))
+    local cnt = buffer(0, 2):le_uint()
+    local ack = buffer(2, 1):le_uint()
+    local subtree = tree:add_le(dap.fields.xfer_rsp, buffer(2, 1))
+    subtree:add_le(dap.fields.xfer_ack, buffer(2, 1))
+    subtree:add_le(dap.fields.xfer_perr, buffer(2, 1))
 
-      if buffer:len() <= 3 then
-         return names.ack[ack] .. " "  .. tostring(cnt) .. " word(s) " .. "Write"
-      end
-      local pos = 3
-      for i = 1, cnt do
-         tree:add_le( dap.fields.xfer_rdat, buffer(pos, 4))
-         pos = pos + 4
-      end
-      return names.ack[ack] .. " "  .. tostring(cnt) .. " word(s) " .. "Read"
-   end
+    if buffer:len() <= 3 then
+      return names.ack[ack] .. " " .. tostring(cnt) .. " word(s) " .. "Write"
+    end
+    
+    local pos = 3
+    for i = 1, cnt do
+      tree:add_le(dap.fields.xfer_rdat, buffer(pos, 4))
+      pos = pos + 4
+    end
+    return names.ack[ack] .. " " .. tostring(cnt) .. " word(s) " .. "Read"
+  end
 end
 
-function dissect_write_abort(is_request, buffer, tree)
-   if is_request then
-      tree:add_le( dap.fields.dap_index, buffer(0, 1))
-      tree:add_le( dap.fields.write_abort, buffer(1, 4))
-      return ""
-   else
-      return dissect_response(buffer, tree)
-   end
+local function dissect_write_abort(is_request, buffer, tree)
+  if is_request then
+    tree:add_le(dap.fields.dap_index, buffer(0, 1))
+    tree:add_le(dap.fields.write_abort, buffer(1, 4))
+    return ""
+  else
+    return dissect_response(buffer, tree)
+  end
 end
 
-function dissect_dap_delay(is_request, buffer, tree)
-   if is_request then
-      tree:add_le( dap.fields.dap_delay, buffer(0, 2))
-      return ""
-   else
-      return dissect_response(buffer, tree)
-   end
+local function dissect_dap_delay(is_request, buffer, tree)
+  if is_request then
+    tree:add_le(dap.fields.dap_delay, buffer(0, 2))
+    return ""
+  else
+    return dissect_response(buffer, tree)
+  end
 end
 
-function dissect_dap_reset_target(is_request, buffer, tree)
-   if false == is_request then
-      text = dissect_response(buffer, tree)
-      tree:add_le( dap.fields.execute, buffer(1, 1))
-      return text
-   end
+local function dissect_dap_reset_target(is_request, buffer, tree)
+  if false == is_request then
+    local text = dissect_response(buffer, tree)
+    tree:add_le(dap.fields.execute, buffer(1, 1))
+    return text
+  end
+  return ""
 end
 
-function dissect_swj_pins(is_request, buffer, tree)
-   if is_request then
-      local subtree = tree:add_le( dap.fields.swj_output, buffer(0, 1))
-      subtree:add_le( dap.fields.swj_tck, buffer(0, 1))
-      subtree:add_le( dap.fields.swj_tms, buffer(0, 1))
-      subtree:add_le( dap.fields.swj_tdi, buffer(0, 1))
-      subtree:add_le( dap.fields.swj_tdo, buffer(0, 1))
-      subtree:add_le( dap.fields.swj_ntrst, buffer(0, 1))
-      subtree:add_le( dap.fields.swj_nreset, buffer(0, 1))
-      local subtree = tree:add_le( dap.fields.swj_select, buffer(1, 1))
-      subtree:add_le( dap.fields.swj_tck, buffer(1, 1))
-      subtree:add_le( dap.fields.swj_tms, buffer(1, 1))
-      subtree:add_le( dap.fields.swj_tdi, buffer(1, 1))
-      subtree:add_le( dap.fields.swj_tdo, buffer(1, 1))
-      subtree:add_le( dap.fields.swj_ntrst, buffer(1, 1))
-      subtree:add_le( dap.fields.swj_nreset, buffer(1, 1))
-      tree:add_le( dap.fields.swj_wait, buffer(2, 4))
-   else
-      local subtree = tree:add_le( dap.fields.swj_input, buffer(0, 1))
-      subtree:add_le( dap.fields.swj_tck, buffer(0, 1))
-      subtree:add_le( dap.fields.swj_tms, buffer(0, 1))
-      subtree:add_le( dap.fields.swj_tdi, buffer(0, 1))
-      subtree:add_le( dap.fields.swj_tdo, buffer(0, 1))
-      subtree:add_le( dap.fields.swj_ntrst, buffer(0, 1))
-      subtree:add_le( dap.fields.swj_nreset, buffer(0, 1))
-   end
-   return ""
+local function dissect_swj_pins(is_request, buffer, tree)
+  if is_request then
+    local subtree = tree:add_le(dap.fields.swj_output, buffer(0, 1))
+    subtree:add_le(dap.fields.swj_tck, buffer(0, 1))
+    subtree:add_le(dap.fields.swj_tms, buffer(0, 1))
+    subtree:add_le(dap.fields.swj_tdi, buffer(0, 1))
+    subtree:add_le(dap.fields.swj_tdo, buffer(0, 1))
+    subtree:add_le(dap.fields.swj_ntrst, buffer(0, 1))
+    subtree:add_le(dap.fields.swj_nreset, buffer(0, 1))
+    
+    local subtree = tree:add_le(dap.fields.swj_select, buffer(1, 1))
+    subtree:add_le(dap.fields.swj_tck, buffer(1, 1))
+    subtree:add_le(dap.fields.swj_tms, buffer(1, 1))
+    subtree:add_le(dap.fields.swj_tdi, buffer(1, 1))
+    subtree:add_le(dap.fields.swj_tdo, buffer(1, 1))
+    subtree:add_le(dap.fields.swj_ntrst, buffer(1, 1))
+    subtree:add_le(dap.fields.swj_nreset, buffer(1, 1))
+    
+    tree:add_le(dap.fields.swj_wait, buffer(2, 4))
+  else
+    local subtree = tree:add_le(dap.fields.swj_input, buffer(0, 1))
+    subtree:add_le(dap.fields.swj_tck, buffer(0, 1))
+    subtree:add_le(dap.fields.swj_tms, buffer(0, 1))
+    subtree:add_le(dap.fields.swj_tdi, buffer(0, 1))
+    subtree:add_le(dap.fields.swj_tdo, buffer(0, 1))
+    subtree:add_le(dap.fields.swj_ntrst, buffer(0, 1))
+    subtree:add_le(dap.fields.swj_nreset, buffer(0, 1))
+  end
+  return ""
 end
 
-function dissect_swj_clk(is_request, buffer, tree)
-   if is_request then
-      tree:add_le( dap.fields.swj_clk, buffer(0, 4))
-      return tostring(buffer(0, 4):le_uint()) .. "Hz"
-   else
-      return dissect_response(buffer, tree)
-   end
+local function dissect_swj_clk(is_request, buffer, tree)
+  if is_request then
+    tree:add_le(dap.fields.swj_clk, buffer(0, 4))
+    return tostring(buffer(0, 4):le_uint()) .. "Hz"
+  else
+    return dissect_response(buffer, tree)
+  end
 end
 
-function dissect_swj_seq(is_request, buffer, tree)
-   if is_request then
-      tree:add_le( dap.fields.swj_seq_cnt, buffer(0, 1))
-      tree:add_le( dap.fields.swj_seq_dat, buffer(1))
-      return ""
-   else
-      return dissect_response(buffer, tree)
-   end
+local function dissect_swj_seq(is_request, buffer, tree)
+  if is_request then
+    tree:add_le(dap.fields.swj_seq_cnt, buffer(0, 1))
+    tree:add_le(dap.fields.swj_seq_dat, buffer(1))
+    return ""
+  else
+    return dissect_response(buffer, tree)
+  end
 end
 
-function dissect_swd_configure(is_request, buffer, tree)
-   if is_request then
-      local subtree = tree:add_le( dap.fields.swd_cfg, buffer(0, 1))
-      tree:add_le( dap.fields.swd_tcp, buffer(0, 1))
-      tree:add_le( dap.fields.swd_dp, buffer(0, 1))
-      return ""
-   else
-      return dissect_response(buffer, tree)
-   end
+local function dissect_swd_configure(is_request, buffer, tree)
+  if is_request then
+    local subtree = tree:add_le(dap.fields.swd_cfg, buffer(0, 1))
+    subtree:add_le(dap.fields.swd_tcp, buffer(0, 1))
+    subtree:add_le(dap.fields.swd_dp, buffer(0, 1))
+    return ""
+  else
+    return dissect_response(buffer, tree)
+  end
 end
 
+-- Main dissector function
 function dap.dissector(buffer, pinfo, tree)
-   len = buffer:len()
-   if len == 0 then return end
+  local len = buffer:len()
+  if len == 0 then return end
 
-   local xfer = usb_fields.transfer_type().value
-   local dev_adr = usb_fields.device_address().value
-   local is_request = (usb_fields.endpointdir().value == 0)
+  local xfer = usb_fields.transfer_type().value
+  local dev_adr = usb_fields.device_address().value
+  local is_request = (usb_fields.endpointdir().value == 0)
 
-   local subtree = tree:add(dap, buffer(), "CMSIS-DAP")
-   local cmd = buffer(0, 1):le_uint()
+  local subtree = tree:add(dap, buffer(), "CMSIS-DAP")
+  local cmd = buffer(0, 1):le_uint()
 
-   local seq_num = nil
-   if pinfo.visited == false then
-      if convlist[dev_adr] == nil then
-         convlist[dev_adr] = {}
-         convlist[dev_adr].seq = {} -- frame number to sequence number
-         convlist[dev_adr].req = {} -- sequence number to request frame number
-         convlist[dev_adr].res = {} -- sequence number to response frame number
-         convlist[dev_adr].inf = {} -- command information to dissect response buffer
+  local seq_num = nil
+  -- Management of debug information
+  if pinfo.visited == false then
+    -- Initialization of communication information
+    if convlist[dev_adr] == nil then
+      convlist[dev_adr] = {
+        seq = {}, -- Mapping from frame number to sequence number
+        req = {}, -- Mapping from sequence number to request frame number
+        res = {}, -- Mapping from sequence number to response frame number
+        inf = {}, -- Command information (used for response buffer analysis)
+      }
+    end
+    
+    -- Request processing
+    if is_request then
+      table.insert(convlist[dev_adr].req, pinfo.number)
+      seq_num = #convlist[dev_adr].req
+      convlist[dev_adr].seq[pinfo.number] = seq_num
+      convlist[dev_adr].inf[seq_num] = {cmd = cmd}
+    else
+      -- Response processing
+      local tentative_num = #convlist[dev_adr].res + 1
+      -- Search for the same command
+      local num_of_reqs = #convlist[dev_adr].req
+      while tentative_num <= num_of_reqs do
+        if cmd == convlist[dev_adr].inf[tentative_num].cmd then
+          break
+        end
+        tentative_num = tentative_num + 1
       end
-      if is_request then
-         table.insert(convlist[dev_adr].req, pinfo.number)
-         seq_num = #convlist[dev_adr].req
-         convlist[dev_adr].seq[pinfo.number] = seq_num
-         convlist[dev_adr].inf[seq_num] = {}
-         convlist[dev_adr].inf[seq_num].cmd = cmd
+      
+      if tentative_num <= num_of_reqs then
+        table.insert(convlist[dev_adr].res, pinfo.number)
+        seq_num = #convlist[dev_adr].res
+        if cmd == convlist[dev_adr].inf[seq_num].cmd then
+          convlist[dev_adr].seq[pinfo.number] = seq_num
+        else
+          -- Loss of response packet
+          convlist[dev_adr].seq[pinfo.number] = -1
+          convlist[dev_adr].seq[convlist[dev_adr].req[seq_num]] = -1
+        end
       else
-         local tentative_num = #convlist[dev_adr].res + 1
-         -- Search the same command
-         local num_of_reqs = #convlist[dev_adr].req
-         while tentative_num <= num_of_reqs do
-            if cmd == convlist[dev_adr].inf[tentative_num].cmd then
-               break
-            end
-            tentative_num = tentative_num + 1
-         end
-         if tentative_num <= num_of_reqs then
-            table.insert(convlist[dev_adr].res, pinfo.number)
-            seq_num = #convlist[dev_adr].res
-            if cmd == convlist[dev_adr].inf[seq_num].cmd then
-               convlist[dev_adr].seq[pinfo.number] = seq_num
-            else
-               -- The response packet lost
-               convlist[dev_adr].seq[pinfo.number] = -1
-               convlist[dev_adr].seq[convlist[dev_adr].req[seq_num]] = -1
-            end
-         else
-            -- The request packet lost
-            convlist[dev_adr].seq[pinfo.number] = -1
-         end
+        -- Loss of request packet
+        convlist[dev_adr].seq[pinfo.number] = -1
       end
-   else
-      seq_num = convlist[dev_adr].seq[pinfo.number]
-      if seq_num < 0 then
-         seq_num = nil
-      end
-   end
-   if nil == seq_num then
-      subtree:add_proto_expert_info( dap.experts.lost)
-   end
+    end
+  else
+    -- Already processed packet
+    seq_num = convlist[dev_adr].seq[pinfo.number]
+    if seq_num and seq_num < 0 then
+      seq_num = nil
+    end
+  end
+  
+  -- Warning for packet loss
+  if nil == seq_num then
+    subtree:add_proto_expert_info(dap.experts.lost)
+  end
 
-   local info_text = ""
-   local command = "Unknown"
-   if names.command[cmd] ~= nil then
-        command = names.command[cmd]
-   end
-   if is_request then
-      info_text = command .. " Request "
-      if seq_num ~= nil or convlist[dev_adr].res[seq_num] ~= nil then
-         subtree:add( dap.fields.res, convlist[dev_adr].res[seq_num])
-      end
-   else
-      info_text = command .. " Response "
-      if seq_num ~= nil then 
-         subtree:add( dap.fields.req, convlist[dev_adr].req[seq_num])
-      end
-   end
+  -- Construction of display information
+  local info_text = ""
+  local command = "Unknown"
+  if names.command[cmd] ~= nil then
+    command = names.command[cmd]
+  end
+  
+  if is_request then
+    info_text = command .. " Request "
+    if seq_num ~= nil and convlist[dev_adr].res[seq_num] ~= nil then
+      subtree:add(dap.fields.res, convlist[dev_adr].res[seq_num])
+    end
+  else
+    info_text = command .. " Response "
+    if seq_num ~= nil then 
+      subtree:add(dap.fields.req, convlist[dev_adr].req[seq_num])
+    end
+  end
 
-   subtree:add_le( dap.fields.cmd, buffer(0, 1))
-   if cmd == vals.command.DAP_INFO then
-      info_text = info_text .. dissect_info(is_request, buffer(1), subtree, convlist[dev_adr].inf[seq_num])
-   elseif cmd == vals.command.DAP_HOST_STATUS then
-      info_text = info_text .. dissect_host_status(is_request, buffer(1), subtree)
-   elseif cmd == vals.command.DAP_CONNECT then
-      info_text = info_text .. dissect_dap_connect(is_request, buffer(1), subtree)
-   elseif cmd == vals.command.DAP_DISCONNECT then
-      info_text = info_text .. dissect_dap_disconnect(is_request, buffer(1), subtree)
-   elseif cmd == vals.command.DAP_TRANSFER_CONFIGURE then
-      info_text = info_text .. dissect_transfer_configure(is_request, buffer(1), subtree)
-   elseif cmd == vals.command.DAP_TRANSFER then
-      info_text = info_text .. dissect_transfer(is_request, buffer(1), subtree, convlist[dev_adr].inf[seq_num])
-   elseif cmd == vals.command.DAP_TRANSFER_BLOCK then
-      info_text = info_text .. dissect_transfer_block(is_request, buffer(1), subtree, convlist[dev_adr].inf[seq_num])
-   elseif cmd == vals.command.DAP_TRANSFER_ABORT then
-      -- TODO: add handling
-   elseif cmd == vals.command.DAP_WRITE_ABORT then
-      info_text = info_text .. dissect_write_abort(is_request, buffer(1), subtree)
-   elseif cmd == vals.command.DAP_DELAY then
-      info_text = info_text .. dissect_dap_delay(is_request, buffer(1), subtree)
-   elseif cmd == vals.command.DAP_RESET_TARGET then
-      info_text = info_text .. dissect_dap_reset_target(is_request, buffer(1), tree)
-   elseif cmd == vals.command.DAP_SWJ_PINS then
-      info_text = info_text .. dissect_swj_pins(is_request, buffer(1), tree)
-   elseif cmd == vals.command.DAP_SWJ_CLOCK then
-      info_text = info_text .. dissect_swj_clk(is_request, buffer(1), subtree)
-   elseif cmd == vals.command.DAP_SWJ_SEQUENCE then
-      info_text = info_text .. dissect_swj_seq(is_request, buffer(1), subtree)
-   elseif cmd == vals.command.DAP_SWD_CONFIGURE then
-      info_text = info_text .. dissect_swd_configure(is_request, buffer(1), subtree)
-   elseif cmd == vals.command.DAP_JTAG_SEQUENCE then
-      -- TODO: add handling
-   elseif cmd == vals.command.DAP_JTAG_CONFIGURE then
-      -- TODO: add handling
-   elseif cmd == vals.command.DAP_JTAG_IDCODE then
-      -- TODO: add handling
-   elseif cmd == vals.command.DAP_SWO_TRANSPORT then
-      -- TODO: add handling
-   elseif cmd == vals.command.DAP_SWO_MODE then
-      -- TODO: add handling
-   elseif cmd == vals.command.DAP_SWO_BAUDRATE then
-      -- TODO: add handling
-   elseif cmd == vals.command.DAP_SWO_CONTROL then
-      -- TODO: add handling
-   elseif cmd == vals.command.DAP_SWO_STATUS then
-      -- TODO: add handling
-   elseif cmd == vals.command.DAP_SWO_DATA then
-      -- TODO: add handling
-   elseif cmd == vals.command.DAP_SWO_DATA then
-      -- TODO: add handling
-   elseif cmd == vals.command.DAP_SWD_SEQUENCE then
-      -- TODO: add handling
-   elseif cmd == vals.command.DAP_SWD_EXTENDED_STATUS then
-      -- TODO: add handling
-   elseif cmd == vals.command.DAP_UART_TRANSPORT then
-      -- TODO: add handling
-   elseif cmd == vals.command.DAP_UART_CONFIGURE then
-      -- TODO: add handling
-   elseif cmd == vals.command.DAP_UART_TRANSFER then
-      -- TODO: add handling
-   elseif cmd == vals.command.DAP_UART_CONTROL then
-      -- TODO: add handling
-   elseif cmd == vals.command.DAP_UART_STATUS then
-      -- TODO: add handling
-   elseif cmd == vals.command.DAP_QUEUE_COMMANDS then
-      -- TODO: add handling
-   elseif cmd == vals.command.DAP_EXECUTE_COMMANDS then
-      -- TODO: add handling
-   end
-   pinfo.cols.info = info_text
-
+  -- Command processing
+  subtree:add_le(dap.fields.cmd, buffer(0, 1))
+  
+  -- Processing by command
+  if cmd == vals.command.DAP_INFO then
+    info_text = info_text .. dissect_info(is_request, buffer(1), subtree, convlist[dev_adr].inf[seq_num] or {})
+  elseif cmd == vals.command.DAP_HOST_STATUS then
+    info_text = info_text .. dissect_host_status(is_request, buffer(1), subtree)
+  elseif cmd == vals.command.DAP_CONNECT then
+    info_text = info_text .. dissect_dap_connect(is_request, buffer(1), subtree)
+  elseif cmd == vals.command.DAP_DISCONNECT then
+    info_text = info_text .. dissect_dap_disconnect(is_request, buffer(1), subtree)
+  elseif cmd == vals.command.DAP_TRANSFER_CONFIGURE then
+    info_text = info_text .. dissect_transfer_configure(is_request, buffer(1), subtree)
+  elseif cmd == vals.command.DAP_TRANSFER then
+    info_text = info_text .. dissect_transfer(is_request, buffer(1), subtree, convlist[dev_adr].inf[seq_num] or {})
+  elseif cmd == vals.command.DAP_TRANSFER_BLOCK then
+    info_text = info_text .. dissect_transfer_block(is_request, buffer(1), subtree, convlist[dev_adr].inf[seq_num] or {})
+  elseif cmd == vals.command.DAP_TRANSFER_ABORT then
+    -- TODO: Add processing
+    info_text = info_text .. "Not implemented"
+  elseif cmd == vals.command.DAP_WRITE_ABORT then
+    info_text = info_text .. dissect_write_abort(is_request, buffer(1), subtree)
+  elseif cmd == vals.command.DAP_DELAY then
+    info_text = info_text .. dissect_dap_delay(is_request, buffer(1), subtree)
+  elseif cmd == vals.command.DAP_RESET_TARGET then
+    info_text = info_text .. dissect_dap_reset_target(is_request, buffer(1), subtree)
+  elseif cmd == vals.command.DAP_SWJ_PINS then
+    info_text = info_text .. dissect_swj_pins(is_request, buffer(1), subtree)
+  elseif cmd == vals.command.DAP_SWJ_CLOCK then
+    info_text = info_text .. dissect_swj_clk(is_request, buffer(1), subtree)
+  elseif cmd == vals.command.DAP_SWJ_SEQUENCE then
+    info_text = info_text .. dissect_swj_seq(is_request, buffer(1), subtree)
+  elseif cmd == vals.command.DAP_SWD_CONFIGURE then
+    info_text = info_text .. dissect_swd_configure(is_request, buffer(1), subtree)
+  elseif cmd == vals.command.DAP_JTAG_SEQUENCE or
+         cmd == vals.command.DAP_JTAG_CONFIGURE or
+         cmd == vals.command.DAP_JTAG_IDCODE or
+         cmd == vals.command.DAP_SWO_TRANSPORT or
+         cmd == vals.command.DAP_SWO_MODE or
+         cmd == vals.command.DAP_SWO_BAUDRATE or
+         cmd == vals.command.DAP_SWO_CONTROL or
+         cmd == vals.command.DAP_SWO_STATUS or
+         cmd == vals.command.DAP_SWO_DATA or
+         cmd == vals.command.DAP_SWD_SEQUENCE or
+         cmd == vals.command.DAP_SWD_EXTENDED_STATUS or
+         cmd == vals.command.DAP_UART_TRANSPORT or
+         cmd == vals.command.DAP_UART_CONFIGURE or
+         cmd == vals.command.DAP_UART_TRANSFER or
+         cmd == vals.command.DAP_UART_CONTROL or
+         cmd == vals.command.DAP_UART_STATUS or
+         cmd == vals.command.DAP_QUEUE_COMMANDS or
+         cmd == vals.command.DAP_EXECUTE_COMMANDS then
+    -- TODO: Add processing for these commands
+    info_text = info_text .. "Not implemented"
+  end
+  
+  pinfo.cols.info = info_text
 end
 
+-- Dissector registration
 DissectorTable.get("usb.bulk"):add(0xff, dap)

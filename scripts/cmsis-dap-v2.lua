@@ -1,10 +1,12 @@
+local DEBUG = false
+
 local convlist = {}
 local dap = Proto("USBDAP", "USB CMSIS-DAP protocol")
 
 local usb_fields = {
-  transfer_type = Field.new("usb.transfer_type"),
-  endpointdir = Field.new("usb.endpoint_address.direction"),
-  device_address = Field.new("usb.device_address"),
+  device_address   = Field.new("usb.device_address"),
+  endpoint_address = Field.new("usb.endpoint_address"),
+  endpointdir      = Field.new("usb.endpoint_address.direction"),
 }
 
 local vals = {
@@ -52,7 +54,7 @@ local vals = {
     DAP_SWO_STATUS          = 27,
     DAP_SWO_DATA            = 28,
     DAP_SWD_SEQUENCE        = 29,
-    DAP_SWD_EXTENDED_STATUS = 30,
+    DAP_SWO_EXTENDED_STATUS = 30,
     DAP_UART_TRANSPORT      = 31,
     DAP_UART_CONFIGURE      = 32,
     DAP_UART_TRANSFER       = 33,
@@ -122,6 +124,7 @@ local names = {
   ack = {[1] = "OK", [2] = "WAIT", [3] = "FAULT", [4] = "NO_ACKT"},
   led = {[0] = "Connect", [1] = "Running"},
   imp = {[0] = "Not implemented", [1] = "Implemented"},
+  err = {[0]="Pass", [1]="Error"},
 }
 
 dap.fields.req = ProtoField.framenum("cmsis_dap.request", "Request", base.NONE, frametype.REQUEST)
@@ -172,6 +175,17 @@ dap.fields.swj_seq_dat = ProtoField.bytes("cmsis_dap.swj_sequence.data", "Bit Da
 dap.fields.swd_cfg = ProtoField.uint8("cmsis_dap.swd_config", "Configuration", base.HEX)
 dap.fields.swd_tcp = ProtoField.uint8("cmsis_dap.swd_config.turnaround_clock_period", "Turnaround clock period", base.HEX, {[0] = "1 clock cycle", [1] = "2 clock cycles", [2] = "3 clock cycles", [3] = "4 clock cycles"}, 0x3)
 dap.fields.swd_dp = ProtoField.uint8("cmsis_dap.swd_config.data_phase", "DataPhase", base.HEX, {[0] = "Do not generate Data Phase on WAIT/FAULT", [1] = "Always generate Data Phase"}, 0x4)
+dap.fields.swo_trans = ProtoField.uint8("cmsis_dap.swo_transport", "Transport", base.HEX, {[0] = "None", [1] = "Read trace data via DAP_SWO_Data command", [2] = "Send trace data via separate USB bulk endpoint"})
+dap.fields.swo_mode = ProtoField.uint8("cmsis_dap.swo_mode", "Mode", base.HEX, {[0] = "Off", [1] = "UART", [2] = "Manchester"})
+dap.fields.swo_baud = ProtoField.uint8("cmsis_dap.swo_baud", "Baudrate", base.DEC_HEX)
+dap.fields.swo_ctrl = ProtoField.uint8("cmsis_dap.swo_ctrl", "Control", base.HEX, {[0] = "Stop", [1] = "Start"})
+dap.fields.swo_sts = ProtoField.uint8("cmsis_dap.swo_sts", "Trace Status", base.HEX)
+dap.fields.swo_act = ProtoField.uint8("cmsis_dap.swo_act", "Trace Capture", base.HEX, {[0] = "Inactive", [1] = "Active"}, 0x1)
+dap.fields.swo_err = ProtoField.uint8("cmsis_dap.swo_err", "Trace Stream Error", base.HEX, names.err, 0x40)
+dap.fields.swo_ovr = ProtoField.uint8("cmsis_dap.swo_ovr", "Trace Buffer Overrun", base.HEX, names.err, 0x80)
+dap.fields.swo_cnt = ProtoField.uint32("cmsis_dap.swo_cnt", "Trace Count", base.DEC_HEX)
+dap.fields.swo_dat = ProtoField.uint8("cmsis_dap.swo_data", "Trace Data", base.DEC_HEX)
+dap.fields.swo_ext_sts = ProtoField.uint8("cmsis_dap.swo_ext_sts", "Control", base.HEX)
 dap.fields.port = ProtoField.uint8("cmsis_dap.connect.port", "Port", base.HEX, names.port)
 dap.fields.dap_index = ProtoField.uint8("cmsis_dap.dap_index", "DAP Index", base.DEC_HEX)
 dap.fields.write_abort = ProtoField.uint32("cmsis_dap.write_abort", "Abort", base.DEC_HEX)
@@ -190,17 +204,32 @@ dap.fields.xfer_match = ProtoField.uint8("cmsis_dap.transfer.request.match", "Ma
 dap.fields.xfer_mask = ProtoField.uint8("cmsis_dap.transfer.request.mask", "Mask", base.HEX, {[0] = "Normal Write Register", [1] = "Write Match Mask (instead of Register)"}, 0x20)
 dap.fields.xfer_ts = ProtoField.uint8("cmsis_dap.transfer.request.timestamp", "Timestamp", base.HEX, {[0] = "No time stamp", [1] = "Include time stamp value from Test Domain Timer before every Transfer Data word"}, 0x80)
 dap.fields.xfer_wdat = ProtoField.uint32("cmsis_dap.transfer.write.data", "Write", base.DEC_HEX)
-dap.fields.xfer_mskdat = ProtoField.uint32("cmsis_dap.transfer.mask.data", "Mask data", base.DEC_HEX)
-dap.fields.xfer_mchdat = ProtoField.uint32("cmsis_dap.transfer.match.data", "Match data", base.DEC_HEX)
+dap.fields.xfer_mskdat = ProtoField.uint32("cmsis_dap.transfer.mask.data", "Mask", base.DEC_HEX)
+dap.fields.xfer_mchdat = ProtoField.uint32("cmsis_dap.transfer.match.data", "Match", base.DEC_HEX)
 dap.fields.xfer_blk_cnt = ProtoField.uint16("cmsis_dap.transfer_block.count", "Count", base.DEC_HEX)
 dap.fields.xfer_rsp = ProtoField.uint8("cmsis_dap.transfer.response", "Response", base.HEX)
 dap.fields.xfer_ack = ProtoField.uint8("cmsis_dap.transfer.response.ack", "Acknowledge", base.HEX, names.ack, 0x7)
-dap.fields.xfer_perr = ProtoField.uint8("cmsis_dap.transfer.response.protocol_error", "Protocol Error", base.HEX, {[0]="Pass", [1]="Error"}, 0x8)
-dap.fields.xfer_miss = ProtoField.uint8("cmsis_dap.transfer.response.value_mismatch", "Value Mismtch", base.HEX, {[0]="Pass", [1]="Error"}, 0x10)
+dap.fields.xfer_perr = ProtoField.uint8("cmsis_dap.transfer.response.protocol_error", "Protocol Error", base.HEX, names.err, 0x8)
+dap.fields.xfer_miss = ProtoField.uint8("cmsis_dap.transfer.response.value_mismatch", "Value Mismtch", base.HEX, names.err, 0x10)
 dap.fields.xfer_rdat = ProtoField.uint32("cmsis_dap.transfer.read.data", "Read", base.DEC_HEX)
+
+dap.fields.swo_pkt_hdr          = ProtoField.uint8("cmsis_dap.swo_pkt.header",        "Header",        base.HEX)
+-- dap.fields.swo_pkt_hdr.num      = ProtoField.uint8("cmsis_dap.swo_pkt.header.num",    "Port/Channel number", base.HEX, nil, 0xF0)
+dap.fields.swo_pkt_type         = ProtoField.string("cmsis_dap.swo_pkt.pkt_type",     "Packet Type")
+dap.fields.swo_pkt_payload      = ProtoField.bytes("cmsis_dap.swo_pkt.payload",       "Payload")
+dap.fields.swo_pkt_port_or_chan = ProtoField.uint8("cmsis_dap.swo_pkt.src_id",        "Source ID / Port", base.DEC)
+dap.fields.swo_pkt_timestamp    = ProtoField.uint32("cmsis_dap.swo_pkt.timestamp",    "Timestamp",     base.DEC)
+dap.fields.swo_pkt_error        = ProtoField.string("cmsis_dap.swo_pkt.error",        "Error")
 
 dap.experts.zl = ProtoExpert.new("cmsis_dap.zero_length", "Zero length", expert.group.MALFORMED, expert.severity.WARN)
 dap.experts.lost = ProtoExpert.new("cmsis_dap.packet_lost", "Relative packet lost", expert.group.PROTOCOL, expert.severity.WARN)
+dap.experts.malformed = ProtoExpert.new("cmsis_dap.malformed", "Malformed CMSIS-DAP Packet", expert.group.MALFORMED, expert.severity.ERROR)
+
+local function debug_print(...)
+  if DEBUG then
+    print(...)
+  end
+end
 
 local function dissect_response(buffer, tree)
   tree:add(dap.fields.res_st, buffer(0, 1))
@@ -342,27 +371,20 @@ local function parse_out_transfer(cnt, buffer, tree)
     pos = pos + 1
 
     if is_write then
-      tree:add_le(dap.fields.xfer_wdat, buffer(pos, 4))
+      tree:add_le(is_mask and dap.fields.xfer_mskdat or dap.fields.xfer_wdat, buffer(pos, 4))
       pos = pos + 4
       if prev_is_write ~= is_write then
         text = text .. "W"
       end
     else
+      if is_match then
+        tree:add_le(dap.fields.xfer_mchdat, buffer(pos, 4))
+        pos = pos + 4
+      end
       if prev_is_write ~= is_write then
         text = text .. "R"
       end
     end
-    
-    if is_mask then
-      tree:add_le(dap.fields.xfer_mskdat, buffer(pos, 4))
-      pos = pos + 4
-    end
-    
-    if is_match then
-      tree:add_le(dap.fields.xfer_mchdat, buffer(pos, 4))
-      pos = pos + 4
-    end
-    
     consec = consec + 1
     prev_is_write = is_write
   end
@@ -376,6 +398,11 @@ end
 
 local function dissect_transfer(is_request, buffer, tree, convinf)
   if is_request then
+    if buffer:len() < 2 then
+      tree:add_proto_expert_info(dap.experts.malformed, "Transfer request buffer is too small")
+      return "Malformed Request"
+    end
+
     tree:add_le(dap.fields.dap_index, buffer(0, 1))
     tree:add_le(dap.fields.xfer_cnt, buffer(1, 1))
     local cnt = buffer(1, 1):le_uint()
@@ -530,21 +557,173 @@ local function dissect_swd_configure(is_request, buffer, tree)
   end
 end
 
--- Main dissector function
+local function dissect_swo_transport(is_request, buffer, tree)
+  if is_request then
+    tree:add_le(dap.fields.swo_trans, buffer(0, 1))
+    return ""
+  else
+    return dissect_response(buffer, tree)
+  end
+end
+ 
+local function dissect_swo_mode(is_request, buffer, tree)
+  if is_request then
+    tree:add_le(dap.fields.swo_mode, buffer(0, 1))
+    return ""
+  else
+    return dissect_response(buffer, tree)
+  end
+end
+
+local function dissect_swo_baudrate(is_request, buffer, tree)
+  if is_request then
+    tree:add_le(dap.fields.swo_baud, buffer(0, 4))
+    return tostring(buffer(0, 4):le_uint()) .. "bps"
+  else
+    tree:add_le(dap.fields.swo_baud, buffer(0, 4))
+    return tostring(buffer(0, 4):le_uint()) .. "bps"
+  end
+end
+
+local function dissect_swo_control(is_request, buffer, tree)
+  if is_request then
+    tree:add_le(dap.fields.swo_ctrl, buffer(0, 1))
+    return ""
+  else
+    return dissect_response(buffer, tree)
+  end
+end
+ 
+local function dissect_swo_status(is_request, buffer, tree)
+  if is_request then
+    return ""
+  else
+    local subtree = tree:add_le(dap.fields.swo_sts, buffer(0, 1))
+    subtree:add_le(dap.fields.swo_act, buffer(0, 1))
+    subtree:add_le(dap.fields.swo_err, buffer(0, 1))
+    subtree:add_le(dap.fields.swo_ovr, buffer(0, 1))
+    tree:add_le(dap.fields.swo_cnt, buffer(1))
+    return ""
+  end
+end
+
+local function dissect_swo_data(is_request, buffer, tree)
+  if is_request then
+    tree:add_le(dap.fields.swo_cnt, buffer(0, 2))
+    return ""
+  else
+    local subtree = tree:add_le(dap.fields.swo_sts, buffer(0, 1))
+    subtree:add_le(dap.fields.swo_act, buffer(0, 1))
+    subtree:add_le(dap.fields.swo_err, buffer(0, 1))
+    subtree:add_le(dap.fields.swo_ovr, buffer(0, 1))
+    local cnt = buffer(1, 2):le_uint()
+    tree:add_le(dap.fields.swo_cnt, buffer(1, 2))
+    local pos = 2
+    for i = 1, cnt do
+      tree:add_le(dap.fields.swo_dat, buffer(pos, 1))
+      pos = pos + 1
+    end
+    return tostring(cnt) .. " byte(s) " .. "Read"
+  end
+end
+
+local function dissect_swd_sequence(is_request, buffer, tree)
+  if is_request then
+    tree:add_le(dap.fields.swj_seq_cnt, buffer(0, 1))
+    tree:add_le(dap.fields.swj_seq_dat, buffer(1))
+    return ""
+  else
+    return dissect_response(buffer, tree)
+  end
+end
+
+local function dissect_swo_extended_status(is_request, buffer, tree)
+  if is_request then
+    tree:add_le(dap.fields.swo_ext_sts, buffer(0, 1))
+    return ""
+  else
+   -- TODO: Add expert info if necessary
+    return ""
+  end
+end
+
+local function dissect_trace(buffer, pinfo, tree)
+  print("SWO Trace")
+  pinfo.cols.protocol = "USBDAP"
+
+  local subtree = tree:add(dap, buffer(), "SWO Packet")
+  local offset = 0
+  local hdr = buffer(offset,1):uint()
+  subtree:add(dap.fields.swo_pkt_hdr, buffer(offset,1))
+
+  -- Determine packet category by lower 2 bits (lsb)
+  local lsb = bit.band(hdr, 0x03)
+
+    if hdr == 0x00 then
+        -- Sync packet: 0x00 repeated ≥6 times
+        subtree:add(dap.fields.swo_pkt_type, buffer(offset,1), "Synchronization Packet")
+        pinfo.cols.info = "SWO Sync"
+        return
+    end
+
+    if lsb == 0 then
+        -- Protocol packet (overflow or timestamp)
+        local proto_type = bit.band(hdr, 0xFC)  -- bits[7:2]
+        if hdr == 0x04 then
+            subtree:add(dap.fields.swo_pkt_type, buffer(offset,1), "Overflow Packet")
+            pinfo.cols.info = "SWO Overflow"
+        elseif proto_type == 0x08 then
+            subtree:add(dap.fields.swo_pkt_type, buffer(offset,1), "Local Timestamp Packet")
+            -- parse variable-length timestamp
+            local ts = 0; local shift = 0; offset = offset + 1
+            repeat
+                local b = buffer(offset,1):uint()
+                ts = ts + bit.band(b, 0x7F) * (2^shift)
+                shift = shift + 7
+                offset = offset + 1
+            until bit.band(b, 0x80) == 0
+            subtree:add(dap.fields.swo_pkt_timestamp, buffer(1, offset-1), ts)
+            pinfo.cols.info = string.format("SWO LocalTS %d", ts)
+        elseif proto_type == 0x0C then
+            -- Global timestamp: 32-bit
+            subtree:add(dap.fields.swo_pkt_type, buffer(offset,1), "Global Timestamp Packet")
+            subtree:add(dap.fields.swo_pkt_timestamp, buffer(offset+1,4))
+            pinfo.cols.info = "SWO GlobalTS"
+        else
+            subtree:add(dap.fields.swo_pkt_error, buffer(offset,1), "Unknown protocol packet")
+            pinfo.cols.info = "SWO Proto?"
+        end
+        return
+    end
+
+    -- Source packet: ITM/DWT data
+    local payload_len = lsb == 3 and 4 or lsb  -- 1,2,4 bytes
+    local src_id      = bit.rshift(bit.band(hdr, 0xF0), 4)
+    local is_hw       = bit.band(hdr, 0x08) ~= 0
+    local label       = is_hw and "DWT" or "ITM"
+
+    subtree:add(dap.fields.swo_pkt_type, buffer(offset,1), string.format("Source Packet (%s)", label))
+    subtree:add(dap.fields.swo_pkt_port_or_chan, buffer(offset,1), src_id)
+    subtree:add(dap.fields.swo_pkt_payload, buffer(offset+1, payload_len))
+    pinfo.cols.info = string.format("SWO %sID %d [%d bytes]", label, src_id, payload_len)
+  return true
+end
+
 function dap.dissector(buffer, pinfo, tree)
+  --debug_print("len: " .. buffer:len())
   local len = buffer:len()
   if len == 0 then return end
 
-  local xfer = usb_fields.transfer_type().value
   local dev_adr = usb_fields.device_address().value
+  local ep_adr = usb_fields.endpoint_address().value
   local is_request = (usb_fields.endpointdir().value == 0)
 
-  local subtree = tree:add(dap, buffer(), "CMSIS-DAP")
   local cmd = buffer(0, 1):le_uint()
 
   local seq_num = nil
   -- Management of debug information
   if pinfo.visited == false then
+    debug_print("Packet number: " .. pinfo.number, "Device address: " .. dev_adr, "Endpoint address: " .. ep_adr, "Command: " .. cmd)
     -- Initialization of communication information
     if convlist[dev_adr] == nil then
       convlist[dev_adr] = {
@@ -554,7 +733,28 @@ function dap.dissector(buffer, pinfo, tree)
         inf = {}, -- Command information (used for response buffer analysis)
       }
     end
-    
+    if is_request then
+      if convlist[dev_adr].ep_out == nil then
+        convlist[dev_adr].ep_out = ep_adr
+      elseif convlist[dev_adr].ep_out ~= ep_adr then
+        return false
+      end
+    else
+      if convlist[dev_adr].ep_in == nil then
+        convlist[dev_adr].ep_in = ep_adr
+      elseif convlist[dev_adr].ep_in ~= ep_adr then
+        if convlist[dev_adr].ep_swo == nil then
+          -- maybe SWO packet
+          print("may be SWO packet", ep_adr)
+          convlist[dev_adr].ep_swo = ep_adr
+        end
+        if convlist[dev_adr].ep_swo == ep_adr then
+          return true
+        else
+          return false
+        end
+      end
+    end
     -- Request processing
     if is_request then
       table.insert(convlist[dev_adr].req, pinfo.number)
@@ -590,11 +790,20 @@ function dap.dissector(buffer, pinfo, tree)
     end
   else
     -- Already processed packet
+    if convlist[dev_adr].ep_out ~= ep_adr and convlist[dev_adr].ep_in ~= ep_adr then
+      if convlist[dev_adr].ep_swo == ep_adr then
+        return dissect_trace(buffer, pinfo, tree)
+      else
+        return false
+      end
+    end
     seq_num = convlist[dev_adr].seq[pinfo.number]
     if seq_num and seq_num < 0 then
       seq_num = nil
     end
   end
+  pinfo.cols.protocol = "USBDAP"
+  local subtree = tree:add(dap, buffer(), "CMSIS-DAP")
   
   -- Warning for packet loss
   if nil == seq_num then
@@ -655,17 +864,25 @@ function dap.dissector(buffer, pinfo, tree)
     info_text = info_text .. dissect_swj_seq(is_request, buffer(1), subtree)
   elseif cmd == vals.command.DAP_SWD_CONFIGURE then
     info_text = info_text .. dissect_swd_configure(is_request, buffer(1), subtree)
+  elseif cmd == vals.command.DAP_SWO_TRANSPORT then
+    info_text = info_text .. dissect_swo_transport(is_request, buffer(1), subtree)
+  elseif cmd == vals.command.DAP_SWO_MODE then
+    info_text = info_text .. dissect_swo_mode(is_request, buffer(1), subtree)
+  elseif cmd == vals.command.DAP_SWO_BAUDRATE then
+    info_text = info_text .. dissect_swo_baudrate(is_request, buffer(1), subtree)
+  elseif cmd == vals.command.DAP_SWO_CONTROL then
+    info_text = info_text .. dissect_swo_control(is_request, buffer(1), subtree)
+  elseif cmd == vals.command.DAP_SWO_STATUS then
+    info_text = info_text .. dissect_swo_status(is_request, buffer(1), subtree)
+  elseif cmd == vals.command.DAP_SWO_DATA then
+    info_text = info_text .. dissect_swo_data(is_request, buffer(1), subtree)
+  elseif cmd == vals.command.DAP_SWD_SEQUENCE then
+    info_text = info_text .. dissect_swd_sequence(is_request, buffer(1), subtree)
+  elseif cmd == vals.command.DAP_SWO_EXTENDED_STATUS then
+    info_text = info_text .. dissect_swo_extended_status(is_request, buffer(1), subtree)
   elseif cmd == vals.command.DAP_JTAG_SEQUENCE or
          cmd == vals.command.DAP_JTAG_CONFIGURE or
          cmd == vals.command.DAP_JTAG_IDCODE or
-         cmd == vals.command.DAP_SWO_TRANSPORT or
-         cmd == vals.command.DAP_SWO_MODE or
-         cmd == vals.command.DAP_SWO_BAUDRATE or
-         cmd == vals.command.DAP_SWO_CONTROL or
-         cmd == vals.command.DAP_SWO_STATUS or
-         cmd == vals.command.DAP_SWO_DATA or
-         cmd == vals.command.DAP_SWD_SEQUENCE or
-         cmd == vals.command.DAP_SWD_EXTENDED_STATUS or
          cmd == vals.command.DAP_UART_TRANSPORT or
          cmd == vals.command.DAP_UART_CONFIGURE or
          cmd == vals.command.DAP_UART_TRANSFER or
@@ -676,7 +893,6 @@ function dap.dissector(buffer, pinfo, tree)
     -- TODO: Add processing for these commands
     info_text = info_text .. "Not implemented"
   end
-  
   pinfo.cols.info = info_text
 end
 

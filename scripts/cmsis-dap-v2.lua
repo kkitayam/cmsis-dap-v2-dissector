@@ -1,6 +1,7 @@
 local DEBUG = false
 
 local convlist = {}
+local fragments = {}
 local dap = Proto("USBDAP", "USB CMSIS-DAP protocol")
 
 local usb_fields = {
@@ -125,6 +126,7 @@ local names = {
   led = {[0] = "Connect", [1] = "Running"},
   imp = {[0] = "Not implemented", [1] = "Implemented"},
   err = {[0]="Pass", [1]="Error"},
+  sh = {[0]="ITM", [1]="DWT"},
 }
 
 dap.fields.req = ProtoField.framenum("cmsis_dap.request", "Request", base.NONE, frametype.REQUEST)
@@ -213,13 +215,32 @@ dap.fields.xfer_perr = ProtoField.uint8("cmsis_dap.transfer.response.protocol_er
 dap.fields.xfer_miss = ProtoField.uint8("cmsis_dap.transfer.response.value_mismatch", "Value Mismtch", base.HEX, names.err, 0x10)
 dap.fields.xfer_rdat = ProtoField.uint32("cmsis_dap.transfer.read.data", "Read", base.DEC_HEX)
 
-dap.fields.swo_pkt_hdr          = ProtoField.uint8("cmsis_dap.swo_pkt.header",        "Header",        base.HEX)
--- dap.fields.swo_pkt_hdr.num      = ProtoField.uint8("cmsis_dap.swo_pkt.header.num",    "Port/Channel number", base.HEX, nil, 0xF0)
-dap.fields.swo_pkt_type         = ProtoField.string("cmsis_dap.swo_pkt.pkt_type",     "Packet Type")
-dap.fields.swo_pkt_payload      = ProtoField.bytes("cmsis_dap.swo_pkt.payload",       "Payload")
-dap.fields.swo_pkt_port_or_chan = ProtoField.uint8("cmsis_dap.swo_pkt.src_id",        "Source ID / Port", base.DEC)
-dap.fields.swo_pkt_timestamp    = ProtoField.uint32("cmsis_dap.swo_pkt.timestamp",    "Timestamp",     base.DEC)
-dap.fields.swo_pkt_error        = ProtoField.string("cmsis_dap.swo_pkt.error",        "Error")
+dap.fields.swo_pkt_sync = ProtoField.bytes("cmsis_dap.swo_sync", "Syncronization packet")
+dap.fields.swo_pkt_ovf = ProtoField.bytes("cmsis_dap.swo_ovf", "Overflow packet")
+dap.fields.swo_pkt_lts = ProtoField.bytes("cmsis_dap.swo_lts", "Local timestamp packet")
+dap.fields.swo_pkt_itm = ProtoField.bytes("cmsis_dap.swo_itm", "ITM packet")
+dap.fields.swo_pkt_dwt = ProtoField.bytes("cmsis_dap.swo_dwt", "DWT packet")
+dap.fields.swo_pkt_hdr = ProtoField.uint8("cmsis_dap.swo_pkt.header", "Header", base.HEX)
+dap.fields.swo_pkt_size = ProtoField.uint8("cmsis_dap.swo_pkt.size", "Packet size", base.DEC, {[1] = "2 bytes", [2] = "3 bytes", [3] = "5 bytes"}, 0x3)
+dap.fields.swo_pkt_itm_or_dwt = ProtoField.uint8("cmsis_dap.swo_pkt.itm_or_dwt", "Category", base.DEC, nil, 0x4)
+dap.fields.swo_pkt_source = ProtoField.uint8("cmsis_dap.swo_pkt.source", "Source ID / Port", base.DEC, nil, 0xF8)
+dap.fields.swo_pkt_payload = ProtoField.uint32("cmsis_dap.swo_pkt.payload", "Payload", base.DEC_HEX)
+dap.fields.swo_pkt_timestamp = ProtoField.uint32("cmsis_dap.swo_pkt.timestamp",    "Timestamp",     base.DEC)
+
+dap.fields.swo_pkt_lts_type = ProtoField.uint8("cmsis_dap.swo_pkt.lts.type", "Local timestamp format", base.HEX, {[0] = "single-byte", [1] = "2 to 5 bytes"}, 0x80)
+dap.fields.swo_pkt_lts_ts = ProtoField.uint8("cmsis_dap.swo_pkt.lts.ts", "Timestamp", base.DEC, nil, 0x30)
+dap.fields.swo_pkt_sh = ProtoField.uint8("cmsis_dap.swo_pkt.source", "Source", base.DEC, names.sh, 0x4)
+dap.fields.swo_pkt_page = ProtoField.uint8("cmsis_dap.swo_pkt.page", "Stimulus port page", base.DEC, nil, 0x70)
+
+dap.fields.swo_evt_cpi = ProtoField.uint8("cmsis_dap.swo_pkt.dwt.event.cpi", "CPICNT", base.HEX, nil, 0x1)
+dap.fields.swo_evt_exc = ProtoField.uint8("cmsis_dap.swo_pkt.dwt.event.exc", "EXCCNT", base.HEX, nil, 0x2)
+dap.fields.swo_evt_sleep = ProtoField.uint8("cmsis_dap.swo_pkt.dwt.event.sleep", "SLEEPCNT", base.HEX, nil, 0x4)
+dap.fields.swo_evt_lsu = ProtoField.uint8("cmsis_dap.swo_pkt.dwt.event.lsu", "LSUCNT", base.HEX, nil, 0x8)
+dap.fields.swo_evt_fold = ProtoField.uint8("cmsis_dap.swo_pkt.dwt.event.fold", "FOLDCNT", base.HEX, nil, 0x10)
+dap.fields.swo_evt_cyc = ProtoField.uint8("cmsis_dap.swo_pkt.dwt.event.cyc", "POSTCNT", base.HEX, nil, 0x20)
+
+dap.fields.swo_exc_num = ProtoField.uint16("cmsis_dap.swo_pkt.dwt.except.num", "Exception number", base.HEX, nil, 0x1FF)
+dap.fields.swo_exc_fn = ProtoField.uint16("cmsis_dap.swo_pkt.dwt.except.fn", "Function", base.HEX, {[1] = "Entered", [2] = "Exited", [3] = "Returned"}, 0x3000)
 
 dap.experts.zl = ProtoExpert.new("cmsis_dap.zero_length", "Zero length", expert.group.MALFORMED, expert.severity.WARN)
 dap.experts.lost = ProtoExpert.new("cmsis_dap.packet_lost", "Relative packet lost", expert.group.PROTOCOL, expert.severity.WARN)
@@ -647,66 +668,136 @@ local function dissect_swo_extended_status(is_request, buffer, tree)
   end
 end
 
-local function dissect_trace(buffer, pinfo, tree)
-  print("SWO Trace")
-  pinfo.cols.protocol = "USBDAP"
+local function dissect_itm_and_dwt_packet(buffer, tree)
 
-  local subtree = tree:add(dap, buffer(), "SWO Packet")
-  local offset = 0
-  local hdr = buffer(offset,1):uint()
-  subtree:add(dap.fields.swo_pkt_hdr, buffer(offset,1))
+  local hdr = buffer(0, 1):uint()
+  if hdr == 0x00 then
+    -- Sync packet: 0x00 repeated ≥6 times
+    local cnt = 0
+    while 0 == buffer(1 + cnt, 1):uint() do
+      cnt = cnt + 1
+    end
+    if cnt >= 5 and 0x80 == buffer(1 + cnt, 1):uint() then
+      -- Sync packet: 0x00 repeated ≥6 times
+      cnt = cnt + 1
+      local subtree = tree:add(dap.fields.swo_pkt_sync, buffer(0, cnt))
+      subtree:add(dap.fields.swo_pkt_hdr, buffer(0, 1))
+      tree:add(dap.fields.swo_pkt_payload, buffer(1, cnt))
+      return cnt
+    else
+      tree:add_proto_expert_info(dap.experts.malformed, "Synchronization Packet malformed")
+      return 0
+    end
+  end
 
   -- Determine packet category by lower 2 bits (lsb)
   local lsb = bit.band(hdr, 0x03)
 
-    if hdr == 0x00 then
-        -- Sync packet: 0x00 repeated ≥6 times
-        subtree:add(dap.fields.swo_pkt_type, buffer(offset,1), "Synchronization Packet")
-        pinfo.cols.info = "SWO Sync"
-        return
+  if lsb == 0 then
+    -- Protocol packet (overflow or timestamp)
+    local proto_type = bit.band(hdr, 0xFC)  -- bits[7:2]
+    if hdr == 0x70 then
+      -- Overflow packet
+      local subtree = tree:add(dap.fields.swo_pkt_ovf, buffer(0, 1))
+      subtree:add(dap.fields.swo_pkt_hdr, buffer(0, 1))
+      return 1
+    elseif 0 == bit.band(hdr, 0x0C) then
+      -- Local timestamp packet
+      if 0 == bit.band(hdr, 0x80) then
+        -- Local timestamp: 1-byte
+        local subtree = tree:add(dap.fields.swo_pkt_lts, buffer(0, 1))
+        local subsubtree = subtree:add(dap.fields.swo_pkt_hdr, buffer(0, 1))
+        subsubtree:add(dap.fields.swo_pkt_lts_type, buffer(0, 1))
+        subsubtree:add(dap.fields.swo_pkt_lts_ts, buffer(0, 1))
+        return 1
+      else
+        -- parse variable-length timestamp
+        local ts = 0
+        local shift = 0
+        local offset = 1
+        repeat
+          -- TODO: max byte length is 5 bytes
+          local b = buffer(offset, 1):uint()
+          ts = ts + bit.band(b, 0x7F) * (2 ^ shift)
+          shift = shift + 7
+          offset = offset + 1
+        until bit.band(b, 0x80) == 0
+        local subtree = tree:add(dap.fields.swo_pkt_lts, buffer(0, offset - 1))
+        local subsubtree = subtree:add(dap.fields.swo_pkt_hdr, buffer(0, 1))
+        subsubtree:add(dap.fields.swo_pkt_lts_type, buffer(0, 1))
+        subtree:add(dap.fields.swo_pkt_timestamp, buffer(1, offset - 1), ts)
+        return offset
+      end
+    elseif 0x08 == bit.band(hdr, 0x0B) then
+      -- Extension
+      local subtree = subtree:add(dap.fields.swo_pkt_type, buffer(0, 1), nil, "Extension")
+      if 0 == bit.band(hdr, 0x80) then
+        subtree:add(dap.fields.swo_pkt_sh, buffer(0, 1))
+        subtree:add(dap.fields.swo_pkt_page, buffer(0, 1))
+        return 1
+      else
+        -- TODO: variable-length
+        return 1
+      end
+    elseif 0x94 == bit.band(hdr, 0xDC) then
+      -- Global timestamp
+      -- TODO: Handle Global Timestamp Packet
+      return 1
+    else
+      subtree:add(dap.fields.swo_pkt_type, buffer(0, 1), nil, "Unknown")
+      return 1
     end
+    return 0
+  end
 
-    if lsb == 0 then
-        -- Protocol packet (overflow or timestamp)
-        local proto_type = bit.band(hdr, 0xFC)  -- bits[7:2]
-        if hdr == 0x04 then
-            subtree:add(dap.fields.swo_pkt_type, buffer(offset,1), "Overflow Packet")
-            pinfo.cols.info = "SWO Overflow"
-        elseif proto_type == 0x08 then
-            subtree:add(dap.fields.swo_pkt_type, buffer(offset,1), "Local Timestamp Packet")
-            -- parse variable-length timestamp
-            local ts = 0; local shift = 0; offset = offset + 1
-            repeat
-                local b = buffer(offset,1):uint()
-                ts = ts + bit.band(b, 0x7F) * (2^shift)
-                shift = shift + 7
-                offset = offset + 1
-            until bit.band(b, 0x80) == 0
-            subtree:add(dap.fields.swo_pkt_timestamp, buffer(1, offset-1), ts)
-            pinfo.cols.info = string.format("SWO LocalTS %d", ts)
-        elseif proto_type == 0x0C then
-            -- Global timestamp: 32-bit
-            subtree:add(dap.fields.swo_pkt_type, buffer(offset,1), "Global Timestamp Packet")
-            subtree:add(dap.fields.swo_pkt_timestamp, buffer(offset+1,4))
-            pinfo.cols.info = "SWO GlobalTS"
-        else
-            subtree:add(dap.fields.swo_pkt_error, buffer(offset,1), "Unknown protocol packet")
-            pinfo.cols.info = "SWO Proto?"
-        end
-        return
-    end
+  -- Source packet: ITM/DWT data
+  local payload_len = lsb == 3 and 4 or lsb  -- 1,2,4 bytes
+  local is_hw       = bit.band(hdr, 0x08) ~= 0
+  local f = is_hw and dap.fields.swo_pkt_dwt or dap.fields.swo_pkt_itm
 
-    -- Source packet: ITM/DWT data
-    local payload_len = lsb == 3 and 4 or lsb  -- 1,2,4 bytes
-    local src_id      = bit.rshift(bit.band(hdr, 0xF0), 4)
-    local is_hw       = bit.band(hdr, 0x08) ~= 0
-    local label       = is_hw and "DWT" or "ITM"
+  if buffer:len() < 1 + payload_len then
+    tree:add_proto_expert_info(dap.experts.malformed, "Packet too small")
+    return 1
+  end
 
-    subtree:add(dap.fields.swo_pkt_type, buffer(offset,1), string.format("Source Packet (%s)", label))
-    subtree:add(dap.fields.swo_pkt_port_or_chan, buffer(offset,1), src_id)
-    subtree:add(dap.fields.swo_pkt_payload, buffer(offset+1, payload_len))
-    pinfo.cols.info = string.format("SWO %sID %d [%d bytes]", label, src_id, payload_len)
-  return true
+  local subtree = tree:add(f, buffer(0, 2))
+  local subsubtree = subtree:add(dap.fields.swo_pkt_hdr, buffer(0, 1))
+  subsubtree:add(dap.fields.swo_pkt_size, buffer(0, 1))
+  subsubtree:add(dap.fields.swo_pkt_itm_or_dwt, buffer(0, 1))
+  subsubtree:add(dap.fields.swo_pkt_source, buffer(0, 1))
+  if 0x05 == hdr then
+    -- Event counter packet
+    subsubtree = subtree:add_le(dap.fields.swo_pkt_payload, buffer(1, 1))
+    subtree:add(dap.fields.swo_evt, buffer(1, 1))
+    subtree:add(dap.fields.swo_evt_cpi, buffer(1, 1))
+    subtree:add(dap.fields.swo_evt_exc, buffer(1, 1))
+    subtree:add(dap.fields.swo_evt_sleep, buffer(1, 1))
+    subtree:add(dap.fields.swo_evt_lsu, buffer(1, 1))
+    subtree:add(dap.fields.swo_evt_fold, buffer(1, 1))
+    subtree:add(dap.fields.swo_evt_cyc, buffer(1, 1))
+    return 2
+  elseif 0x0e == hdr then
+    -- Exception trace
+    subsubtree = subtree:add_le(dap.fields.swo_pkt_payload, buffer(1, 2))
+    subsubtree:add_le(dap.fields.swo_exc_num, buffer(1, 2))
+    subsubtree:add_le(dap.fields.swo_exc_fn, buffer(1, 2))
+    return 3
+  end
+
+  subtree:add_le(dap.fields.swo_pkt_payload, buffer(1, payload_len))
+  return 1 + payload_len
+end
+
+local function dissect_trace(buffer, pinfo, tree)
+  pinfo.cols.protocol = "USBDAP"
+  pinfo.cols.info = "ITM/DWT Trace"
+  local subtree = tree:add(dap, buffer(), "CMSIS-DAP")
+  local offset = 0
+  while offset < buffer:len() do
+    local len = dissect_itm_and_dwt_packet(buffer(offset), subtree)
+    if len == 0 then return end
+    offset = offset + len
+  end
 end
 
 function dap.dissector(buffer, pinfo, tree)

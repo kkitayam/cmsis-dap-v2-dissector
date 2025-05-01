@@ -64,6 +64,16 @@ local vals = {
     DAP_QUEUE_COMMANDS      = 126,
     DAP_EXECUTE_COMMANDS    = 127,
   },
+  type = {
+    PKT_UNK = -1,
+    PKT_SYN = 0,
+    PKT_OVF = 1,
+    PKT_LTS = 2,
+    PKT_GTS = 3,
+    PKT_EXT = 4,
+    PKT_DWT = 5,
+    PKT_ITM = 6,
+  },
 }
 
 local names = {
@@ -127,6 +137,7 @@ local names = {
   imp = {[0] = "Not implemented", [1] = "Implemented"},
   err = {[0]="Pass", [1]="Error"},
   sh = {[0]="ITM", [1]="DWT"},
+  type = { [-1] = "UNK", [0] = "SYN", [1] = "OVF", [2] = "LTS", [3] = "GTS", [4] = "EXT", [5] = "DWT", [6] = "ITM"},
 }
 
 dap.fields.req = ProtoField.framenum("cmsis_dap.request", "Request", base.NONE, frametype.REQUEST)
@@ -218,6 +229,8 @@ dap.fields.xfer_rdat = ProtoField.uint32("cmsis_dap.transfer.read.data", "Read",
 dap.fields.swo_pkt_sync = ProtoField.bytes("cmsis_dap.swo_sync", "Syncronization packet")
 dap.fields.swo_pkt_ovf = ProtoField.bytes("cmsis_dap.swo_ovf", "Overflow packet")
 dap.fields.swo_pkt_lts = ProtoField.bytes("cmsis_dap.swo_lts", "Local timestamp packet")
+dap.fields.swo_pkt_gts = ProtoField.bytes("cmsis_dap.swo_gts", "Global timestamp packet")
+dap.fields.swo_pkt_ext = ProtoField.bytes("cmsis_dap.swo_ext", "Extension")
 dap.fields.swo_pkt_itm = ProtoField.bytes("cmsis_dap.swo_itm", "ITM packet")
 dap.fields.swo_pkt_dwt = ProtoField.bytes("cmsis_dap.swo_dwt", "DWT packet")
 dap.fields.swo_pkt_hdr = ProtoField.uint8("cmsis_dap.swo_pkt.header", "Header", base.HEX)
@@ -673,29 +686,25 @@ local function dissect_itm_and_dwt_packet(buffer, tree)
   local hdr = buffer(0, 1):uint()
   if hdr == 0x00 then
     -- Sync packet: 0x00 repeated ≥6 times
-    local cnt = 0
-    while 0 == buffer(1 + cnt, 1):uint() do
+    if buffer:len() < 6 then return 0 end
+    local cnt = 1
+    while 0 == buffer(cnt, 1):uint() and cnt < buffer:len() - 1 do
       cnt = cnt + 1
     end
-    if cnt >= 5 and 0x80 == buffer(1 + cnt, 1):uint() then
+    if cnt >= 5 and 0x80 == buffer(cnt, 1):uint() then
       -- Sync packet: 0x00 repeated ≥6 times
       cnt = cnt + 1
       local subtree = tree:add(dap.fields.swo_pkt_sync, buffer(0, cnt))
       subtree:add(dap.fields.swo_pkt_hdr, buffer(0, 1))
-      tree:add(dap.fields.swo_pkt_payload, buffer(1, cnt))
       return cnt
     else
-      tree:add_proto_expert_info(dap.experts.malformed, "Synchronization Packet malformed")
-      return 0
+        return 0
     end
   end
 
   -- Determine packet category by lower 2 bits (lsb)
   local lsb = bit.band(hdr, 0x03)
-
   if lsb == 0 then
-    -- Protocol packet (overflow or timestamp)
-    local proto_type = bit.band(hdr, 0xFC)  -- bits[7:2]
     if hdr == 0x70 then
       -- Overflow packet
       local subtree = tree:add(dap.fields.swo_pkt_ovf, buffer(0, 1))
@@ -716,7 +725,7 @@ local function dissect_itm_and_dwt_packet(buffer, tree)
         local shift = 0
         local offset = 1
         repeat
-          -- TODO: max byte length is 5 bytes
+          if offset > 4 or offset >= buffer:len() then return 0 end
           local b = buffer(offset, 1):uint()
           ts = ts + bit.band(b, 0x7F) * (2 ^ shift)
           shift = shift + 7
@@ -730,22 +739,33 @@ local function dissect_itm_and_dwt_packet(buffer, tree)
       end
     elseif 0x08 == bit.band(hdr, 0x0B) then
       -- Extension
-      local subtree = subtree:add(dap.fields.swo_pkt_type, buffer(0, 1), nil, "Extension")
       if 0 == bit.band(hdr, 0x80) then
+        local subtree = tree:add(dap.fields.swo_pkt_ext, buffer(0, 1))
         subtree:add(dap.fields.swo_pkt_sh, buffer(0, 1))
         subtree:add(dap.fields.swo_pkt_page, buffer(0, 1))
         return 1
       else
-        -- TODO: variable-length
-        return 1
+        local ex = bit.band(hdr, 0x70) / 16
+        local shift = 3
+        local offset = 1
+        repeat
+          if offset >= buffer:len() then return 0 end
+          local b = buffer(offset, 1):uint()
+          local v = offset < 4 and bit.band(b, 0x7F) or b
+          ex = ex + v * (2 ^ shift)
+          shift = shift + 7
+          offset = offset + 1
+        until bit.band(b, 0x80) == 0 or offset == 5
+        local subtree = tree:add(dap.fields.swo_pkt_ext, buffer(0, offset))
+        return offset
       end
     elseif 0x94 == bit.band(hdr, 0xDC) then
       -- Global timestamp
       -- TODO: Handle Global Timestamp Packet
       return 1
     else
-      subtree:add(dap.fields.swo_pkt_type, buffer(0, 1), nil, "Unknown")
-      return 1
+      -- handle error
+      return 0
     end
     return 0
   end
@@ -754,13 +774,9 @@ local function dissect_itm_and_dwt_packet(buffer, tree)
   local payload_len = lsb == 3 and 4 or lsb  -- 1,2,4 bytes
   local is_hw       = bit.band(hdr, 0x08) ~= 0
   local f = is_hw and dap.fields.swo_pkt_dwt or dap.fields.swo_pkt_itm
+  if buffer:len() < 1 + payload_len then return 0 end
 
-  if buffer:len() < 1 + payload_len then
-    tree:add_proto_expert_info(dap.experts.malformed, "Packet too small")
-    return 1
-  end
-
-  local subtree = tree:add(f, buffer(0, 2))
+  local subtree = tree:add(f, buffer(0, payload_len + 1))
   local subsubtree = subtree:add(dap.fields.swo_pkt_hdr, buffer(0, 1))
   subsubtree:add(dap.fields.swo_pkt_size, buffer(0, 1))
   subsubtree:add(dap.fields.swo_pkt_itm_or_dwt, buffer(0, 1))
@@ -789,14 +805,166 @@ local function dissect_itm_and_dwt_packet(buffer, tree)
 end
 
 local function dissect_trace(buffer, pinfo, tree)
+  local dev_adr = usb_fields.device_address().value
+  local pkts = ""
+  frg = fragments[dev_adr]
+  if frg ~= nil then
+    local pkt_types = frg.pkts[pinfo.number] or {}
+    local t = ""
+    for i = 1, #pkt_types do
+      t = t .. names.type[pkt_types[i]] .. " "
+    end
+    pkts = t
+    -- print("frame number: ", pinfo.number, "packet type: " .. t)
+    -- print("rem ", fragments[dev_adr].rem[pinfo.number])
+  end
+
   pinfo.cols.protocol = "USBDAP"
-  pinfo.cols.info = "ITM/DWT Trace"
   local subtree = tree:add(dap, buffer(), "CMSIS-DAP")
   local offset = 0
+  local cnt = 0
   while offset < buffer:len() do
     local len = dissect_itm_and_dwt_packet(buffer(offset), subtree)
-    if len == 0 then return end
+    if len == 0 then break end
     offset = offset + len
+    cnt = cnt + 1
+  end
+  pinfo.cols.info = "SWO_Data " .. cnt .. " packet(s) " .. pkts
+end
+
+local function parse_itm_and_dwt_packet(buffer)
+  local hdr = buffer:uint(0, 1)
+
+  if hdr == 0x00 then
+    -- Sync packet: 0x00 repeated ≥6 times
+    if buffer:len() == 1 then return -5 end
+    local cnt = 1
+    while 0 == buffer:uint(cnt, 1) and cnt < buffer:len() - 1 do
+      cnt = cnt + 1
+    end
+    if cnt == buffer:len() then return buffer:len() < 6 and buffer:len() - 6 or -1 end
+    if cnt >= 5 and 0x80 == buffer:uint(cnt, 1) then
+      -- Sync packet: 0x00 repeated ≥6 times
+      cnt = cnt + 1
+      return cnt, 0
+    else
+      return cnt, -1 -- malformed packet
+    end
+  end
+
+  -- Determine packet category by lower 2 bits (lsb)
+  local lsb = bit.band(hdr, 0x03)
+  if lsb == 0 then
+    if hdr == 0x70 then
+      -- Overflow packet
+      return 1, 1
+    elseif 0 == bit.band(hdr, 0x0C) then
+      -- Local timestamp packet
+      if 0 == bit.band(hdr, 0x80) then
+        -- Local timestamp: 1-byte
+        return 1, 2
+      else
+        -- parse variable-length timestamp
+        local offset = 1
+        repeat
+          if offset > 4 then return offset, -1 end -- malformed packet
+          if offset >= buffer:len() then return offset - 5 end
+          local b = buffer:uint(offset, 1)
+          offset = offset + 1
+        until bit.band(b, 0x80) == 0
+        return offset, 2
+      end
+    elseif 0x08 == bit.band(hdr, 0x0B) then
+      -- Extension
+      if 0 == bit.band(hdr, 0x80) then
+        return 1, 4
+      else
+        local offset = 1
+        repeat
+          if offset >= buffer:len() then return offset - 5 end
+          local b = buffer:uint(offset, 1)
+          offset = offset + 1
+        until bit.band(b, 0x80) == 0 or offset == 5
+        return offset, 4
+      end
+    elseif 0x94 == bit.band(hdr, 0xDC) then
+      -- Global timestamp
+      if 0x94 == hdr then
+        local offset = 1
+        repeat
+          if offset >= buffer:len() then return offset - 5 end
+          local b = buffer:uint(offset, 1)
+          offset = offset + 1
+        until bit.band(b, 0x80) == 0 or offset == 5
+        return offset, 3
+      else
+        local offset = 1
+        repeat
+          if offset >= buffer:len() then return offset - 7 end
+          local b = buffer:uint(offset, 1)
+          offset = offset + 1
+        until bit.band(b, 0x80) == 0 or offset == 7
+        if offset == 5 or offset == 7 then
+          return offset, 3
+        else
+          return offset, -1 -- malformed packet
+        end
+      end
+    else
+      -- handle error
+      return 0
+    end
+  end
+
+  -- Source packet: ITM/DWT data
+  local payload_len = lsb == 3 and 4 or lsb  -- 1,2,4 bytes
+  local packet_type = bit.band(hdr, 0x08) ~= 0 and 5 or 6
+  if buffer:len() < 1 + payload_len then return buffer:len() - (1 + payload_len), packet_type end
+  return 1 + payload_len, packet_type
+end
+
+local function parse_trace(tvb, pinfo)
+  local dev_adr = usb_fields.device_address().value
+  local seq_num = nil
+  if fragments[dev_adr] == nil then
+    fragments[dev_adr] = {
+      seq = {}, -- Mapping from frame number to sequence number
+      res = {}, -- Mapping from sequence number to response frame number
+      pkts = {}, -- Packet type array
+      rem = {}, -- Remainder of bytes as ByteArray
+    }
+  end
+  table.insert(fragments[dev_adr].res, pinfo.number)
+  seq_num = #fragments[dev_adr].res
+  fragments[dev_adr].seq[pinfo.number] = seq_num
+  local buffer = tvb:bytes()
+  -- print("frame number: ", pinfo.number, "seq_num: ", seq_num, "buffer: ", buffer, "len: ", buffer:len())
+  if seq_num > 1 then
+    local prev_frame = fragments[dev_adr].res[seq_num - 1]
+    if fragments[dev_adr].rem[prev_frame] then
+      buffer:prepend(fragments[dev_adr].rem[prev_frame])
+    end
+    -- print("cur", pinfo.number, "prev", prev_frame, "buffer", buffer)
+  end
+  local pkt_types = {}
+  local offset = 0
+  local cnt = 0
+  local pkt_len = 0
+  while offset < buffer:len() do
+    local pkt_type = nil
+    pkt_len, pkt_type = parse_itm_and_dwt_packet(buffer:subset(offset, buffer:len() - offset))
+    if pkt_len <= 0 then break end
+    table.insert(pkt_types, pkt_type)
+    offset = offset + pkt_len
+    cnt = cnt + 1
+  end
+  -- print("saved desegement: ", pinfo.saved_can_desegment, " len: ", pinfo.desegment_len, "offset ", pinfo.desegment_offset)
+  fragments[dev_adr].pkts[pinfo.number] = pkt_types
+  -- print("frame", pinfo.number, "packet type", table.unpack(pkt_types))
+  if offset < tvb:len() then
+    -- print("frame number: ", pinfo.number, "remaining data: ", tvb:bytes(offset), " len: ", tvb:len() - offset)
+    fragments[dev_adr].rem[pinfo.number] = tvb:bytes(offset)
+    -- print("frame ", pinfo.number, " Remaining data: ", fragments[dev_adr].rem[pinfo.number])
   end
 end
 
@@ -836,10 +1004,10 @@ function dap.dissector(buffer, pinfo, tree)
       elseif convlist[dev_adr].ep_in ~= ep_adr then
         if convlist[dev_adr].ep_swo == nil then
           -- maybe SWO packet
-          print("may be SWO packet", ep_adr)
           convlist[dev_adr].ep_swo = ep_adr
         end
         if convlist[dev_adr].ep_swo == ep_adr then
+          parse_trace(buffer, pinfo)
           return true
         else
           return false

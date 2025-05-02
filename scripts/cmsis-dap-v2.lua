@@ -811,8 +811,9 @@ local function dissect_trace(buffer, pinfo, tree)
   if frg ~= nil then
     local pkt_types = frg.pkts[pinfo.number] or {}
     local t = ""
-    for i = 1, #pkt_types do
-      t = t .. names.type[pkt_types[i]] .. " "
+    for i, v in ipairs(pkt_types) do
+      t = t .. names.type[v.type] .. " "
+      -- print("frame number", pinfo.number, "packet type", names.type[v.type], "beg", v.ofs_beg,"end", v.ofs_end)
     end
     pkts = t
     -- print("frame number: ", pinfo.number, "packet type: " .. t)
@@ -842,7 +843,9 @@ local function parse_itm_and_dwt_packet(buffer)
     while 0 == buffer:uint(cnt, 1) and cnt < buffer:len() - 1 do
       cnt = cnt + 1
     end
-    if cnt == buffer:len() then return buffer:len() < 6 and buffer:len() - 6 or -1 end
+    if 0 == buffer:uint(cnt, 1) and cnt == buffer:len() - 1 then
+      return buffer:len() < 6 and buffer:len() - 6 or -1
+    end
     if cnt >= 5 and 0x80 == buffer:uint(cnt, 1) then
       -- Sync packet: 0x00 repeated ≥6 times
       cnt = cnt + 1
@@ -954,7 +957,7 @@ local function parse_trace(tvb, pinfo)
     local pkt_type = nil
     pkt_len, pkt_type = parse_itm_and_dwt_packet(buffer:subset(offset, buffer:len() - offset))
     if pkt_len <= 0 then break end
-    table.insert(pkt_types, pkt_type)
+    table.insert(pkt_types, {type = pkt_type, ofs_beg = offset, ofs_end = offset + pkt_len})
     offset = offset + pkt_len
     cnt = cnt + 1
   end

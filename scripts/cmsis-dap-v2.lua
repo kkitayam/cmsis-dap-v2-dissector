@@ -844,29 +844,40 @@ local function dissect_trace(tvb, pinfo, tree)
     subtree = tree:add(dap, ltvb, "CMSIS-DAP")
   end
   local dev_adr = usb_fields.device_address().value
+  if fragments[dev_adr] == nil then
+    fragments[dev_adr] = {
+      seq = {}, -- Mapping from frame number to sequence number
+      res = {}, -- Mapping from sequence number to response frame number
+      rem = {}, -- Remainder of bytes as ByteArray
+    }
+  end
   local frg = fragments[dev_adr]
+  local seq_num
+  if pinfo.visited == false then
+    table.insert(frg.res, pinfo.number)
+    seq_num = #frg.res
+    frg.seq[pinfo.number] = seq_num
+  else
+    seq_num = frg.seq[pinfo.number]
+  end
   local ltvb = tvb
-  if frg ~= nil then
-    local seq_num = frg.seq[pinfo.number]
-    -- print("frame number: ", pinfo.number, "seq_num: ", seq_num, "buffer: ", buffer, "len: ", buffer:len())
-    if seq_num > 1 then
-      local prev_frame = frg.res[seq_num - 1]
-      if frg.rem[prev_frame] then
-        local buffer = tvb:bytes()
-        buffer:prepend(frg.rem[prev_frame])
-        ltvb = buffer:tvb("SWO_Trace_" .. prev_frame .. "_" .. pinfo.number)
+  if seq_num > 1 then
+    local prev_frame = frg.res[seq_num - 1]
+    if frg.rem[prev_frame] then
+      local buffer = tvb:bytes()
+      buffer:prepend(frg.rem[prev_frame])
+      ltvb = buffer:tvb("SWO_Trace_" .. prev_frame .. "_" .. pinfo.number)
 
-        if subtree then
-          subtree:add(dap.fields.swo_reassembled, prev_frame)
-        end
+      if subtree then
+        subtree:add(dap.fields.swo_reassembled, prev_frame)
       end
-      -- print("cur", pinfo.number, "prev", prev_frame, "buffer", buffer)
     end
-    if subtree then
-      local next_frame = frg.res[seq_num + 1]
-      if next_frame and frg.rem[pinfo.number] then
-        subtree:add(dap.fields.swo_reassembled, next_frame)
-      end
+    debug_print("cur", pinfo.number, "prev", prev_frame, "tvb", tvb:bytes())
+  end
+  if subtree then
+    local next_frame = frg.res[seq_num + 1]
+    if next_frame and frg.rem[pinfo.number] then
+      subtree:add(dap.fields.swo_reassembled, next_frame)
     end
   end
 
@@ -882,61 +893,15 @@ local function dissect_trace(tvb, pinfo, tree)
       pkts = pkts .. names.type[pkt_type] .. " "
     end
   end
+  if pinfo.visited == false and offset < ltvb:len() then
+    fragments[dev_adr].rem[pinfo.number] = ltvb:bytes(offset)
+  end
   if pinfo.visited then
     pinfo.cols.info = "SWO_Data " .. cnt .. " packet(s) " .. pkts
   end
 end
 
-
-local function parse_trace(tvb, pinfo)
-  local dev_adr = usb_fields.device_address().value
-  local seq_num = nil
-  if fragments[dev_adr] == nil then
-    fragments[dev_adr] = {
-      seq = {}, -- Mapping from frame number to sequence number
-      res = {}, -- Mapping from sequence number to response frame number
-      pkts = {}, -- Packet type array
-      rem = {}, -- Remainder of bytes as ByteArray
-    }
-  end
-  table.insert(fragments[dev_adr].res, pinfo.number)
-  seq_num = #fragments[dev_adr].res
-  fragments[dev_adr].seq[pinfo.number] = seq_num
-  local ltvb = tvb
-  -- print("frame number: ", pinfo.number, "seq_num: ", seq_num, "buffer: ", buffer, "len: ", buffer:len())
-  if seq_num > 1 then
-    local prev_frame = fragments[dev_adr].res[seq_num - 1]
-    if fragments[dev_adr].rem[prev_frame] then
-      local buffer = tvb:bytes()
-      buffer:prepend(fragments[dev_adr].rem[prev_frame])
-      ltvb = buffer:tvb("SWO_Trace_" .. prev_frame .. "_" .. pinfo.number)
-    end
-    -- print("cur", pinfo.number, "prev", prev_frame, "buffer", buffer)
-  end
-  local pkt_types = {}
-  local offset = 0
-  local cnt = 0
-  while offset < ltvb:len() do
-    local pkt_type
-    local pkt_len
-    pkt_len, pkt_type = dissect_itm_and_dwt_packet(ltvb(offset), nil)
-    if pkt_len <= 0 then break end
-    table.insert(pkt_types, {type = pkt_type, ofs_beg = offset, ofs_end = offset + pkt_len})
-    offset = offset + pkt_len
-    cnt = cnt + 1
-  end
-  -- print("saved desegement: ", pinfo.saved_can_desegment, " len: ", pinfo.desegment_len, "offset ", pinfo.desegment_offset)
-  fragments[dev_adr].pkts[pinfo.number] = pkt_types
-  -- print("frame", pinfo.number, "packet type", table.unpack(pkt_types))
-  if offset < ltvb:len() then
-    -- print("frame number: ", pinfo.number, "remaining data: ", ltvb:bytes(offset), " len: ", ltvb:len() - offset)
-    fragments[dev_adr].rem[pinfo.number] = ltvb:bytes(offset)
-    -- print("frame ", pinfo.number, " Remaining data: ", fragments[dev_adr].rem[pinfo.number])
-  end
-end
-
 function dap.dissector(buffer, pinfo, tree)
-  --debug_print("len: " .. buffer:len())
   local len = buffer:len()
   if len == 0 then return end
 
@@ -974,7 +939,7 @@ function dap.dissector(buffer, pinfo, tree)
           convlist[dev_adr].ep_swo = ep_adr
         end
         if convlist[dev_adr].ep_swo == ep_adr then
-          parse_trace(buffer, pinfo)
+          dissect_trace(buffer, pinfo, nil)
           return true
         else
           return false

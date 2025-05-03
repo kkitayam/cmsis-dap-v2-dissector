@@ -1,7 +1,7 @@
 local DEBUG = false
 
-local convlist = {}
-local fragments = {}
+local convlist = {} -- List of conversations
+local fragments = {} -- Reassembled fragments
 local dap = Proto("USBDAP", "USB CMSIS-DAP protocol")
 
 local usb_fields = {

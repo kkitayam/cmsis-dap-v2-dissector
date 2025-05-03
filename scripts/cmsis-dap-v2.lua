@@ -226,6 +226,7 @@ dap.fields.xfer_perr = ProtoField.uint8("cmsis_dap.transfer.response.protocol_er
 dap.fields.xfer_miss = ProtoField.uint8("cmsis_dap.transfer.response.value_mismatch", "Value Mismtch", base.HEX, names.err, 0x10)
 dap.fields.xfer_rdat = ProtoField.uint32("cmsis_dap.transfer.read.data", "Read", base.DEC_HEX)
 
+dap.fields.swo_reassembled = ProtoField.framenum("cmsis_dap.swo_reassemble", "Reassembled", base.NONE, frametype.NONE)
 dap.fields.swo_pkt_sync = ProtoField.bytes("cmsis_dap.swo_sync", "Syncronization packet")
 dap.fields.swo_pkt_ovf = ProtoField.bytes("cmsis_dap.swo_ovf", "Overflow packet")
 dap.fields.swo_pkt_lts = ProtoField.bytes("cmsis_dap.swo_lts", "Local timestamp packet")
@@ -681,174 +682,26 @@ local function dissect_swo_extended_status(is_request, buffer, tree)
   end
 end
 
-local function dissect_itm_and_dwt_packet(buffer, tree)
-
-  local hdr = buffer(0, 1):uint()
-  if hdr == 0x00 then
-    -- Sync packet: 0x00 repeated ≥6 times
-    if buffer:len() < 6 then return 0 end
-    local cnt = 1
-    while 0 == buffer(cnt, 1):uint() and cnt < buffer:len() - 1 do
-      cnt = cnt + 1
-    end
-    if cnt >= 5 and 0x80 == buffer(cnt, 1):uint() then
-      -- Sync packet: 0x00 repeated ≥6 times
-      cnt = cnt + 1
-      local subtree = tree:add(dap.fields.swo_pkt_sync, buffer(0, cnt))
-      subtree:add(dap.fields.swo_pkt_hdr, buffer(0, 1))
-      return cnt
-    else
-        return 0
-    end
-  end
-
-  -- Determine packet category by lower 2 bits (lsb)
-  local lsb = bit.band(hdr, 0x03)
-  if lsb == 0 then
-    if hdr == 0x70 then
-      -- Overflow packet
-      local subtree = tree:add(dap.fields.swo_pkt_ovf, buffer(0, 1))
-      subtree:add(dap.fields.swo_pkt_hdr, buffer(0, 1))
-      return 1
-    elseif 0 == bit.band(hdr, 0x0C) then
-      -- Local timestamp packet
-      if 0 == bit.band(hdr, 0x80) then
-        -- Local timestamp: 1-byte
-        local subtree = tree:add(dap.fields.swo_pkt_lts, buffer(0, 1))
-        local subsubtree = subtree:add(dap.fields.swo_pkt_hdr, buffer(0, 1))
-        subsubtree:add(dap.fields.swo_pkt_lts_type, buffer(0, 1))
-        subsubtree:add(dap.fields.swo_pkt_lts_ts, buffer(0, 1))
-        return 1
-      else
-        -- parse variable-length timestamp
-        local ts = 0
-        local shift = 0
-        local offset = 1
-        repeat
-          if offset > 4 or offset >= buffer:len() then return 0 end
-          local b = buffer(offset, 1):uint()
-          ts = ts + bit.band(b, 0x7F) * (2 ^ shift)
-          shift = shift + 7
-          offset = offset + 1
-        until bit.band(b, 0x80) == 0
-        local subtree = tree:add(dap.fields.swo_pkt_lts, buffer(0, offset - 1))
-        local subsubtree = subtree:add(dap.fields.swo_pkt_hdr, buffer(0, 1))
-        subsubtree:add(dap.fields.swo_pkt_lts_type, buffer(0, 1))
-        subtree:add(dap.fields.swo_pkt_timestamp, buffer(1, offset - 1), ts)
-        return offset
-      end
-    elseif 0x08 == bit.band(hdr, 0x0B) then
-      -- Extension
-      if 0 == bit.band(hdr, 0x80) then
-        local subtree = tree:add(dap.fields.swo_pkt_ext, buffer(0, 1))
-        subtree:add(dap.fields.swo_pkt_sh, buffer(0, 1))
-        subtree:add(dap.fields.swo_pkt_page, buffer(0, 1))
-        return 1
-      else
-        local ex = bit.band(hdr, 0x70) / 16
-        local shift = 3
-        local offset = 1
-        repeat
-          if offset >= buffer:len() then return 0 end
-          local b = buffer(offset, 1):uint()
-          local v = offset < 4 and bit.band(b, 0x7F) or b
-          ex = ex + v * (2 ^ shift)
-          shift = shift + 7
-          offset = offset + 1
-        until bit.band(b, 0x80) == 0 or offset == 5
-        local subtree = tree:add(dap.fields.swo_pkt_ext, buffer(0, offset))
-        return offset
-      end
-    elseif 0x94 == bit.band(hdr, 0xDC) then
-      -- Global timestamp
-      -- TODO: Handle Global Timestamp Packet
-      return 1
-    else
-      -- handle error
-      return 0
-    end
-    return 0
-  end
-
-  -- Source packet: ITM/DWT data
-  local payload_len = lsb == 3 and 4 or lsb  -- 1,2,4 bytes
-  local is_hw       = bit.band(hdr, 0x08) ~= 0
-  local f = is_hw and dap.fields.swo_pkt_dwt or dap.fields.swo_pkt_itm
-  if buffer:len() < 1 + payload_len then return 0 end
-
-  local subtree = tree:add(f, buffer(0, payload_len + 1))
-  local subsubtree = subtree:add(dap.fields.swo_pkt_hdr, buffer(0, 1))
-  subsubtree:add(dap.fields.swo_pkt_size, buffer(0, 1))
-  subsubtree:add(dap.fields.swo_pkt_itm_or_dwt, buffer(0, 1))
-  subsubtree:add(dap.fields.swo_pkt_source, buffer(0, 1))
-  if 0x05 == hdr then
-    -- Event counter packet
-    subsubtree = subtree:add_le(dap.fields.swo_pkt_payload, buffer(1, 1))
-    subtree:add(dap.fields.swo_evt, buffer(1, 1))
-    subtree:add(dap.fields.swo_evt_cpi, buffer(1, 1))
-    subtree:add(dap.fields.swo_evt_exc, buffer(1, 1))
-    subtree:add(dap.fields.swo_evt_sleep, buffer(1, 1))
-    subtree:add(dap.fields.swo_evt_lsu, buffer(1, 1))
-    subtree:add(dap.fields.swo_evt_fold, buffer(1, 1))
-    subtree:add(dap.fields.swo_evt_cyc, buffer(1, 1))
-    return 2
-  elseif 0x0e == hdr then
-    -- Exception trace
-    subsubtree = subtree:add_le(dap.fields.swo_pkt_payload, buffer(1, 2))
-    subsubtree:add_le(dap.fields.swo_exc_num, buffer(1, 2))
-    subsubtree:add_le(dap.fields.swo_exc_fn, buffer(1, 2))
-    return 3
-  end
-
-  subtree:add_le(dap.fields.swo_pkt_payload, buffer(1, payload_len))
-  return 1 + payload_len
-end
-
-local function dissect_trace(buffer, pinfo, tree)
-  local dev_adr = usb_fields.device_address().value
-  local pkts = ""
-  frg = fragments[dev_adr]
-  if frg ~= nil then
-    local pkt_types = frg.pkts[pinfo.number] or {}
-    local t = ""
-    for i, v in ipairs(pkt_types) do
-      t = t .. names.type[v.type] .. " "
-      -- print("frame number", pinfo.number, "packet type", names.type[v.type], "beg", v.ofs_beg,"end", v.ofs_end)
-    end
-    pkts = t
-    -- print("frame number: ", pinfo.number, "packet type: " .. t)
-    -- print("rem ", fragments[dev_adr].rem[pinfo.number])
-  end
-
-  pinfo.cols.protocol = "USBDAP"
-  local subtree = tree:add(dap, buffer(), "CMSIS-DAP")
-  local offset = 0
-  local cnt = 0
-  while offset < buffer:len() do
-    local len = dissect_itm_and_dwt_packet(buffer(offset), subtree)
-    if len == 0 then break end
-    offset = offset + len
-    cnt = cnt + 1
-  end
-  pinfo.cols.info = "SWO_Data " .. cnt .. " packet(s) " .. pkts
-end
-
-local function parse_itm_and_dwt_packet(buffer)
-  local hdr = buffer:uint(0, 1)
+local function dissect_itm_and_dwt_packet(tvb, tree)
+  local hdr = tvb(0, 1):uint()
 
   if hdr == 0x00 then
     -- Sync packet: 0x00 repeated ≥6 times
-    if buffer:len() == 1 then return -5 end
+    if tvb:len() == 1 then return -5 end
     local cnt = 1
-    while 0 == buffer:uint(cnt, 1) and cnt < buffer:len() - 1 do
+    while 0 == tvb(cnt, 1):uint() and cnt < tvb:len() - 1 do
       cnt = cnt + 1
     end
-    if 0 == buffer:uint(cnt, 1) and cnt == buffer:len() - 1 then
-      return buffer:len() < 6 and buffer:len() - 6 or -1
+    if 0 == tvb(cnt, 1):uint() and cnt == tvb:len() - 1 then
+      return tvb:len() < 6 and tvb:len() - 6 or -1
     end
-    if cnt >= 5 and 0x80 == buffer:uint(cnt, 1) then
+    if cnt >= 5 and 0x80 == tvb(cnt, 1):uint() then
       -- Sync packet: 0x00 repeated ≥6 times
       cnt = cnt + 1
+      if tree then
+        local subtree = tree:add(dap.fields.swo_pkt_sync, tvb(0, cnt))
+        subtree:add(dap.fields.swo_pkt_hdr, tvb(0, 1))
+      end
       return cnt, 0
     else
       return cnt, -1 -- malformed packet
@@ -860,34 +713,68 @@ local function parse_itm_and_dwt_packet(buffer)
   if lsb == 0 then
     if hdr == 0x70 then
       -- Overflow packet
+      if tree then
+        local subtree = tree:add(dap.fields.swo_pkt_ovf, buffer(0, 1))
+        subtree:add(dap.fields.swo_pkt_hdr, buffer(0, 1))
+      end
       return 1, 1
     elseif 0 == bit.band(hdr, 0x0C) then
       -- Local timestamp packet
       if 0 == bit.band(hdr, 0x80) then
         -- Local timestamp: 1-byte
+        if tree then
+          local subtree = tree:add(dap.fields.swo_pkt_lts, tvb(0, 1))
+          local subsubtree = subtree:add(dap.fields.swo_pkt_hdr, tvb(0, 1))
+          subsubtree:add(dap.fields.swo_pkt_lts_type, tvb(0, 1))
+          subsubtree:add(dap.fields.swo_pkt_lts_ts, tvb(0, 1))
+        end
         return 1, 2
       else
         -- parse variable-length timestamp
+        local ts = 0
+        local shift = 0
         local offset = 1
         repeat
           if offset > 4 then return offset, -1 end -- malformed packet
-          if offset >= buffer:len() then return offset - 5 end
-          local b = buffer:uint(offset, 1)
+          if offset >= tvb:len() then return offset - 5 end
+          local b = tvb(offset, 1):uint()
+          ts = ts + bit.lshift(bit.band(b, 0x7F), shift) -- accumulate timestamp
+          shift = shift + 7
           offset = offset + 1
         until bit.band(b, 0x80) == 0
+        if tree then
+          local subtree = tree:add(dap.fields.swo_pkt_lts, tvb(0, offset - 1))
+          local subsubtree = subtree:add(dap.fields.swo_pkt_hdr, tvb(0, 1))
+          subsubtree:add(dap.fields.swo_pkt_lts_type, tvb(0, 1))
+          subtree:add(dap.fields.swo_pkt_timestamp, tvb(1, offset - 1), ts)
+        end
         return offset, 2
       end
     elseif 0x08 == bit.band(hdr, 0x0B) then
       -- Extension
       if 0 == bit.band(hdr, 0x80) then
+        if tree then
+          local subtree = tree:add(dap.fields.swo_pkt_ext, tvb(0, 1))
+          subtree:add(dap.fields.swo_pkt_sh, tvb(0, 1))
+          subtree:add(dap.fields.swo_pkt_page, tvb(0, 1))
+        end
         return 1, 4
       else
+        local ex = bit.band(hdr, 0x70) / 16
+        local shift = 3
         local offset = 1
         repeat
-          if offset >= buffer:len() then return offset - 5 end
-          local b = buffer:uint(offset, 1)
+          if offset >= tvb:len() then return offset - 5 end
+          local b = tvb(offset, 1):uint()
+          local v = offset < 4 and bit.band(b, 0x7F) or b
+          ex = ex + v * (2 ^ shift)
+          shift = shift + 7
           offset = offset + 1
         until bit.band(b, 0x80) == 0 or offset == 5
+        if tree then
+          local subtree = tree:add(dap.fields.swo_pkt_ext, tvb(0, offset))
+          -- TODO: Add more fields
+        end
         return offset, 4
       end
     elseif 0x94 == bit.band(hdr, 0xDC) then
@@ -895,16 +782,16 @@ local function parse_itm_and_dwt_packet(buffer)
       if 0x94 == hdr then
         local offset = 1
         repeat
-          if offset >= buffer:len() then return offset - 5 end
-          local b = buffer:uint(offset, 1)
+          if offset >= tvb:len() then return offset - 5 end
+          local b = tvb(offset, 1):uint()
           offset = offset + 1
         until bit.band(b, 0x80) == 0 or offset == 5
         return offset, 3
       else
         local offset = 1
         repeat
-          if offset >= buffer:len() then return offset - 7 end
-          local b = buffer:uint(offset, 1)
+          if offset >= tvb:len() then return offset - 7 end
+          local b = tvb(offset, 1):uint()
           offset = offset + 1
         until bit.band(b, 0x80) == 0 or offset == 7
         if offset == 5 or offset == 7 then
@@ -922,9 +809,84 @@ local function parse_itm_and_dwt_packet(buffer)
   -- Source packet: ITM/DWT data
   local payload_len = lsb == 3 and 4 or lsb  -- 1,2,4 bytes
   local packet_type = bit.band(hdr, 0x08) ~= 0 and 5 or 6
-  if buffer:len() < 1 + payload_len then return buffer:len() - (1 + payload_len), packet_type end
+  if tvb:len() < 1 + payload_len then return tvb:len() - (1 + payload_len), packet_type end
+  if tree then
+    local is_hw = bit.band(hdr, 0x08) ~= 0
+    local f = is_hw and dap.fields.swo_pkt_dwt or dap.fields.swo_pkt_itm
+    local subtree = tree:add(f, tvb(0, payload_len + 1))
+    local subsubtree = subtree:add(dap.fields.swo_pkt_hdr, tvb(0, 1))
+    subsubtree:add(dap.fields.swo_pkt_size, tvb(0, 1))
+    subsubtree:add(dap.fields.swo_pkt_itm_or_dwt, tvb(0, 1))
+    subsubtree:add(dap.fields.swo_pkt_source, tvb(0, 1))
+    subsubtree = subtree:add_le(dap.fields.swo_pkt_payload, tvb(1, payload_len))
+    if 0x05 == hdr then
+      -- Event counter packet
+      subsubtree:add(dap.fields.swo_evt, tvb(1, 1))
+      subsubtree:add(dap.fields.swo_evt_cpi, tvb(1, 1))
+      subsubtree:add(dap.fields.swo_evt_exc, tvb(1, 1))
+      subsubtree:add(dap.fields.swo_evt_sleep, tvb(1, 1))
+      subsubtree:add(dap.fields.swo_evt_lsu, tvb(1, 1))
+      subsubtree:add(dap.fields.swo_evt_fold, tvb(1, 1))
+      subsubtree:add(dap.fields.swo_evt_cyc, tvb(1, 1))
+    elseif 0x0e == hdr then
+      -- Exception trace
+      subsubtree:add_le(dap.fields.swo_exc_num, tvb(1, 2))
+      subsubtree:add_le(dap.fields.swo_exc_fn, tvb(1, 2))
+    end
+  end
   return 1 + payload_len, packet_type
 end
+
+local function dissect_trace(tvb, pinfo, tree)
+  local subtree
+  if pinfo.visited then
+    pinfo.cols.protocol = "USBDAP"
+    subtree = tree:add(dap, ltvb, "CMSIS-DAP")
+  end
+  local dev_adr = usb_fields.device_address().value
+  local frg = fragments[dev_adr]
+  local ltvb = tvb
+  if frg ~= nil then
+    local seq_num = frg.seq[pinfo.number]
+    -- print("frame number: ", pinfo.number, "seq_num: ", seq_num, "buffer: ", buffer, "len: ", buffer:len())
+    if seq_num > 1 then
+      local prev_frame = frg.res[seq_num - 1]
+      if frg.rem[prev_frame] then
+        local buffer = tvb:bytes()
+        buffer:prepend(frg.rem[prev_frame])
+        ltvb = buffer:tvb("SWO_Trace_" .. prev_frame .. "_" .. pinfo.number)
+
+        if subtree then
+          subtree:add(dap.fields.swo_reassembled, prev_frame)
+        end
+      end
+      -- print("cur", pinfo.number, "prev", prev_frame, "buffer", buffer)
+    end
+    if subtree then
+      local next_frame = frg.res[seq_num + 1]
+      if next_frame and frg.rem[pinfo.number] then
+        subtree:add(dap.fields.swo_reassembled, next_frame)
+      end
+    end
+  end
+
+  local pkts = ""
+  local offset = 0
+  local cnt = 0
+  while offset < ltvb:len() do
+    local pkt_len, pkt_type = dissect_itm_and_dwt_packet(ltvb(offset), subtree)
+    if pkt_len <= 0 then break end
+    offset = offset + pkt_len
+    cnt = cnt + 1
+    if pinfo.visited then
+      pkts = pkts .. names.type[pkt_type] .. " "
+    end
+  end
+  if pinfo.visited then
+    pinfo.cols.info = "SWO_Data " .. cnt .. " packet(s) " .. pkts
+  end
+end
+
 
 local function parse_trace(tvb, pinfo)
   local dev_adr = usb_fields.device_address().value
@@ -940,22 +902,24 @@ local function parse_trace(tvb, pinfo)
   table.insert(fragments[dev_adr].res, pinfo.number)
   seq_num = #fragments[dev_adr].res
   fragments[dev_adr].seq[pinfo.number] = seq_num
-  local buffer = tvb:bytes()
+  local ltvb = tvb
   -- print("frame number: ", pinfo.number, "seq_num: ", seq_num, "buffer: ", buffer, "len: ", buffer:len())
   if seq_num > 1 then
     local prev_frame = fragments[dev_adr].res[seq_num - 1]
     if fragments[dev_adr].rem[prev_frame] then
+      local buffer = tvb:bytes()
       buffer:prepend(fragments[dev_adr].rem[prev_frame])
+      ltvb = buffer:tvb("SWO_Trace_" .. prev_frame .. "_" .. pinfo.number)
     end
     -- print("cur", pinfo.number, "prev", prev_frame, "buffer", buffer)
   end
   local pkt_types = {}
   local offset = 0
   local cnt = 0
-  local pkt_len = 0
-  while offset < buffer:len() do
-    local pkt_type = nil
-    pkt_len, pkt_type = parse_itm_and_dwt_packet(buffer:subset(offset, buffer:len() - offset))
+  while offset < ltvb:len() do
+    local pkt_type
+    local pkt_len
+    pkt_len, pkt_type = dissect_itm_and_dwt_packet(ltvb(offset), nil)
     if pkt_len <= 0 then break end
     table.insert(pkt_types, {type = pkt_type, ofs_beg = offset, ofs_end = offset + pkt_len})
     offset = offset + pkt_len
@@ -964,9 +928,9 @@ local function parse_trace(tvb, pinfo)
   -- print("saved desegement: ", pinfo.saved_can_desegment, " len: ", pinfo.desegment_len, "offset ", pinfo.desegment_offset)
   fragments[dev_adr].pkts[pinfo.number] = pkt_types
   -- print("frame", pinfo.number, "packet type", table.unpack(pkt_types))
-  if offset < tvb:len() then
-    -- print("frame number: ", pinfo.number, "remaining data: ", tvb:bytes(offset), " len: ", tvb:len() - offset)
-    fragments[dev_adr].rem[pinfo.number] = tvb:bytes(offset)
+  if offset < ltvb:len() then
+    -- print("frame number: ", pinfo.number, "remaining data: ", ltvb:bytes(offset), " len: ", ltvb:len() - offset)
+    fragments[dev_adr].rem[pinfo.number] = ltvb:bytes(offset)
     -- print("frame ", pinfo.number, " Remaining data: ", fragments[dev_adr].rem[pinfo.number])
   end
 end

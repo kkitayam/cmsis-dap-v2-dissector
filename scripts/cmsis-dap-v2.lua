@@ -197,7 +197,7 @@ dap.fields.swo_act = ProtoField.uint8("cmsis_dap.swo_act", "Trace Capture", base
 dap.fields.swo_err = ProtoField.uint8("cmsis_dap.swo_err", "Trace Stream Error", base.HEX, names.err, 0x40)
 dap.fields.swo_ovr = ProtoField.uint8("cmsis_dap.swo_ovr", "Trace Buffer Overrun", base.HEX, names.err, 0x80)
 dap.fields.swo_cnt = ProtoField.uint32("cmsis_dap.swo_cnt", "Trace Count", base.DEC_HEX)
-dap.fields.swo_dat = ProtoField.uint8("cmsis_dap.swo_data", "Trace Data", base.DEC_HEX)
+dap.fields.swo_dat = ProtoField.bytes("cmsis_dap.swo_data", "Trace Data")
 dap.fields.swo_ext_sts = ProtoField.uint8("cmsis_dap.swo_ext_sts", "Control", base.HEX)
 dap.fields.port = ProtoField.uint8("cmsis_dap.connect.port", "Port", base.HEX, names.port)
 dap.fields.dap_index = ProtoField.uint8("cmsis_dap.dap_index", "DAP Index", base.DEC_HEX)
@@ -263,6 +263,28 @@ dap.experts.malformed = ProtoExpert.new("cmsis_dap.malformed", "Malformed CMSIS-
 local function debug_print(...)
   if DEBUG then
     print(...)
+  end
+end
+
+local function get_fragment(dev_adr)
+  if fragments[dev_adr] == nil then
+    fragments[dev_adr] = {
+      seq = {}, -- Mapping from frame number to sequence number
+      res = {}, -- Mapping from sequence number to response frame number
+      rem = {}, -- Remainder of bytes as ByteArray
+    }
+  end
+  return fragments[dev_adr]
+end
+
+local function get_seq_num(frg, frame_num, visited)
+  if visited == false then
+    table.insert(frg.res, frame_num)
+    local seq_num = #frg.res
+    frg.seq[frame_num] = seq_num
+    return seq_num
+  else
+    return frg.seq[frame_num]
   end
 end
 
@@ -642,26 +664,6 @@ local function dissect_swo_status(is_request, buffer, tree)
   end
 end
 
-local function dissect_swo_data(is_request, buffer, tree)
-  if is_request then
-    tree:add_le(dap.fields.swo_cnt, buffer(0, 2))
-    return ""
-  else
-    local subtree = tree:add_le(dap.fields.swo_sts, buffer(0, 1))
-    subtree:add_le(dap.fields.swo_act, buffer(0, 1))
-    subtree:add_le(dap.fields.swo_err, buffer(0, 1))
-    subtree:add_le(dap.fields.swo_ovr, buffer(0, 1))
-    local cnt = buffer(1, 2):le_uint()
-    tree:add_le(dap.fields.swo_cnt, buffer(1, 2))
-    local pos = 2
-    for i = 1, cnt do
-      tree:add_le(dap.fields.swo_dat, buffer(pos, 1))
-      pos = pos + 1
-    end
-    return tostring(cnt) .. " byte(s) " .. "Read"
-  end
-end
-
 local function dissect_swd_sequence(is_request, buffer, tree)
   if is_request then
     tree:add_le(dap.fields.swj_seq_cnt, buffer(0, 1))
@@ -837,6 +839,37 @@ local function dissect_itm_and_dwt_packet(tvb, tree)
   return 1 + payload_len, packet_type
 end
 
+local function dissect_swo_data(is_request, buffer, tree)
+  if is_request then
+    tree:add_le(dap.fields.swo_cnt, buffer(0, 2))
+    return ""
+  else
+    local subtree = tree:add_le(dap.fields.swo_sts, buffer(0, 1))
+    subtree:add_le(dap.fields.swo_act, buffer(0, 1))
+    subtree:add_le(dap.fields.swo_err, buffer(0, 1))
+    subtree:add_le(dap.fields.swo_ovr, buffer(0, 1))
+    local cnt = buffer(1, 2):le_uint()
+    tree:add_le(dap.fields.swo_cnt, buffer(1, 2))
+    if cnt == 0 then
+      return ""
+    else
+      tree:add_le(dap.fields.swo_dat, buffer(3))
+
+      local pkts = ""
+      local pkt_cnt = 0
+      local offset = 3
+      while offset < buffer:len() do
+        local pkt_len, pkt_type = dissect_itm_and_dwt_packet(buffer(offset), tree)
+        if pkt_len <= 0 then break end
+        offset = offset + pkt_len
+        pkt_cnt = pkt_cnt + 1
+        pkts = pkts .. names.type[pkt_type] .. " "
+      end
+      return tostring(pkt_cnt) .. " packet(s) " .. pkts
+    end
+  end
+end
+
 local function dissect_trace(tvb, pinfo, tree)
   local subtree
   if pinfo.visited then
@@ -844,22 +877,8 @@ local function dissect_trace(tvb, pinfo, tree)
     subtree = tree:add(dap, ltvb, "CMSIS-DAP")
   end
   local dev_adr = usb_fields.device_address().value
-  if fragments[dev_adr] == nil then
-    fragments[dev_adr] = {
-      seq = {}, -- Mapping from frame number to sequence number
-      res = {}, -- Mapping from sequence number to response frame number
-      rem = {}, -- Remainder of bytes as ByteArray
-    }
-  end
-  local frg = fragments[dev_adr]
-  local seq_num
-  if pinfo.visited == false then
-    table.insert(frg.res, pinfo.number)
-    seq_num = #frg.res
-    frg.seq[pinfo.number] = seq_num
-  else
-    seq_num = frg.seq[pinfo.number]
-  end
+  local frg = get_fragment(dev_adr)
+  local seq_num = get_seq_num(frg, pinfo.number, pinfo.visited)
   local ltvb = tvb
   if seq_num > 1 then
     local prev_frame = frg.res[seq_num - 1]

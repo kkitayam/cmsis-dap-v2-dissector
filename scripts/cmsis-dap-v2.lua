@@ -22,7 +22,7 @@ local vals = {
     TARGET_BOARD_NAME = 8,
     PRODUCT_FIRMWARE_VERSION = 9,
     CAPABILITIES = 0xF0,
-    TEST_DOMAIN_TIMER_= 0xF1,
+    TEST_DOMAIN_TIMER = 0xF1,
     UART_RECEIVE_BUFFER_SIZE = 0xFB,
     UART_TRANSMIT_BUFFER_SIZE = 0xFC,
     SWO_TRACE_BUFFER_SIZE = 0xFD,
@@ -135,6 +135,7 @@ local names = {
   ack = {[1] = "OK", [2] = "WAIT", [3] = "FAULT", [4] = "NO_ACKT"},
   led = {[0] = "Connect", [1] = "Running"},
   imp = {[0] = "Not implemented", [1] = "Implemented"},
+  swomode = {[0] = "Off", [1] = "UART", [2] = "Manchester"},
   err = {[0]="Pass", [1]="Error"},
   sh = {[0]="ITM", [1]="DWT"},
   type = { [-1] = "UNK", [0] = "SYN", [1] = "OVF", [2] = "LTS", [3] = "GTS", [4] = "EXT", [5] = "DWT", [6] = "ITM"},
@@ -189,7 +190,7 @@ dap.fields.swd_cfg = ProtoField.uint8("cmsis_dap.swd_config", "Configuration", b
 dap.fields.swd_tcp = ProtoField.uint8("cmsis_dap.swd_config.turnaround_clock_period", "Turnaround clock period", base.HEX, {[0] = "1 clock cycle", [1] = "2 clock cycles", [2] = "3 clock cycles", [3] = "4 clock cycles"}, 0x3)
 dap.fields.swd_dp = ProtoField.uint8("cmsis_dap.swd_config.data_phase", "DataPhase", base.HEX, {[0] = "Do not generate Data Phase on WAIT/FAULT", [1] = "Always generate Data Phase"}, 0x4)
 dap.fields.swo_trans = ProtoField.uint8("cmsis_dap.swo_transport", "Transport", base.HEX, {[0] = "None", [1] = "Read trace data via DAP_SWO_Data command", [2] = "Send trace data via separate USB bulk endpoint"})
-dap.fields.swo_mode = ProtoField.uint8("cmsis_dap.swo_mode", "Mode", base.HEX, {[0] = "Off", [1] = "UART", [2] = "Manchester"})
+dap.fields.swo_mode = ProtoField.uint8("cmsis_dap.swo_mode", "Mode", base.HEX, names.swomode)
 dap.fields.swo_baud = ProtoField.uint8("cmsis_dap.swo_baud", "Baudrate", base.DEC_HEX)
 dap.fields.swo_ctrl = ProtoField.uint8("cmsis_dap.swo_ctrl", "Control", base.HEX, {[0] = "Stop", [1] = "Start"})
 dap.fields.swo_sts = ProtoField.uint8("cmsis_dap.swo_sts", "Trace Status", base.HEX)
@@ -289,92 +290,119 @@ local function get_seq_num(frg, frame_num, visited)
 end
 
 local function dissect_response(buffer, tree)
-  tree:add(dap.fields.res_st, buffer(0, 1))
+  if tree then
+    tree:add(dap.fields.res_st, buffer(0, 1))
+  end
   return names.response[buffer(0, 1):le_uint()]
 end
 
 local function dissect_info(is_request, buffer, tree, convinf)
   if is_request then
+    if tree then
+      tree:add_le(dap.fields.id, buffer(0, 1))
+    end
     local id = buffer(0,1):le_uint()
-    tree:add_le(dap.fields.id, buffer(0, 1))
     convinf.id = id
     return names.id[id]
   end
 
-  tree:add_le(dap.fields.len, buffer(0, 1))
+  if tree then
+    tree:add_le(dap.fields.len, buffer(0, 1))
+  end
   local id = convinf.id
   local len = buffer(0,1):le_uint()
 
-  if 0 == len then
-    return names.id[id]
-  end
+  text = ""
+  if len > 0 then
+    if vals.id.VENDOR_NAME == id then
+      if tree then tree:add(dap.fields.vendor, buffer(1)) end
+      text = " " .. buffer(1):string()
+    elseif vals.id.PRODUCT_NAME == id then
+      if tree then tree:add(dap.fields.product, buffer(1)) end
+      text = " " .. buffer(1):string()
+    elseif vals.id.SERIAL_NUMBER == id then
+      if tree then tree:add(dap.fields.serial, buffer(1)) end
+      text = " " .. buffer(1):string()
+    elseif vals.id.CMSIS_DAP_PROTOCOL_VERSION == id then
+      if tree then tree:add(dap.fields.dap_ver, buffer(1)) end
+      text = " " .. buffer(1):string()
+    elseif vals.id.TARGET_DEVICE_VENDOR == id then
+      if tree then tree:add(dap.fields.dev_vendor, buffer(1)) end
+      text = " " .. buffer(1):string()
+    elseif vals.id.TARGET_DEVICE_NAME == id then
+      if tree then tree:add(dap.fields.dev_name, buffer(1)) end
+      text = " " .. buffer(1):string()
+    elseif vals.id.TARGET_BOARD_VENDOR == id then
+      if tree then tree:add(dap.fields.board_vendor, buffer(1)) end
+      text = " " .. buffer(1):string()
+    elseif vals.id.TARGET_BOARD_NAME == id then
+      if tree then tree:add(dap.fields.board_name, buffer(1)) end
+      text = " " .. buffer(1):string()
+    elseif vals.id.PRODUCT_FIRMWARE_VERSION == id then
+      if tree then tree:add(dap.fields.fw_version, buffer(1)) end
+      text = " " .. buffer(1):string()
+    elseif vals.id.CAPABILITIES == id then
+      if tree then
+        local subtree = tree:add_le(dap.fields.caps, buffer(1))
+        if len > 0 then
+          subtree:add_le(dap.fields.impswd, buffer(1, 1))
+          subtree:add_le(dap.fields.impjtag, buffer(1, 1))
+          subtree:add_le(dap.fields.swoua, buffer(1, 1))
+          subtree:add_le(dap.fields.swoman, buffer(1, 1))
+          subtree:add_le(dap.fields.atomic, buffer(1, 1))
+          subtree:add_le(dap.fields.tmr, buffer(1, 1))
+          subtree:add_le(dap.fields.swostm, buffer(1, 1))
+          subtree:add_le(dap.fields.ua, buffer(1, 1))
+        end
+        if len > 1 then
+          subtree:add_le(dap.fields.usbcom, buffer(2, 1))
+        end
+      end
+    elseif vals.id.TEST_DOMAIN_TIMER == id then
 
-  if vals.id.VENDOR_NAME == id then
-    tree:add(dap.fields.vendor, buffer(1))
-  elseif vals.id.PRODUCT_NAME == id then
-    tree:add(dap.fields.product, buffer(1))
-  elseif vals.id.SERIAL_NUMBER == id then
-    tree:add(dap.fields.serial, buffer(1))
-  elseif vals.id.CMSIS_DAP_PROTOCOL_VERSION == id then
-    tree:add(dap.fields.dap_ver, buffer(1))
-  elseif vals.id.TARGET_DEVICE_VENDOR == id then
-    tree:add(dap.fields.dev_vendor, buffer(1))
-  elseif vals.id.TARGET_DEVICE_NAME == id then
-    tree:add(dap.fields.dev_name, buffer(1))
-  elseif vals.id.TARGET_BOARD_VENDOR == id then
-    tree:add(dap.fields.board_vendor, buffer(1))
-  elseif vals.id.TARGET_BOARD_NAME == id then
-    tree:add(dap.fields.board_name, buffer(1))
-  elseif vals.id.PRODUCT_FIRMWARE_VERSION == id then
-    tree:add(dap.fields.fw_version, buffer(1))
-  elseif vals.id.CAPABILITIES == id then
-    local subtree = tree:add_le(dap.fields.caps, buffer(1))
-    if len > 0 then
-      subtree:add_le(dap.fields.impswd, buffer(1, 1))
-      subtree:add_le(dap.fields.impjtag, buffer(1, 1))
-      subtree:add_le(dap.fields.swoua, buffer(1, 1))
-      subtree:add_le(dap.fields.swoman, buffer(1, 1))
-      subtree:add_le(dap.fields.atomic, buffer(1, 1))
-      subtree:add_le(dap.fields.tmr, buffer(1, 1))
-      subtree:add_le(dap.fields.swostm, buffer(1, 1))
-      subtree:add_le(dap.fields.ua, buffer(1, 1))
+    elseif vals.id.UART_RECEIVE_BUFFER_SIZE == id then
+      if tree then tree:add(dap.fields.uarxbufsz, buffer(1, 4)) end
+      text = " " .. buffer(1, 4):le_uint() .. " bytes"
+    elseif vals.id.UART_TRANSMIT_BUFFER_SIZE == id then
+      if tree then tree:add(dap.fields.uatxbufsz, buffer(1, 4)) end
+      text = " " .. buffer(1, 4):le_uint() .. " bytes"
+    elseif vals.id.SWO_TRACE_BUFFER_SIZE == id then
+      if tree then tree:add(dap.fields.swobufsz, buffer(1, 4)) end
+      text = " " .. buffer(1, 4):le_uint() .. " bytes"
+    elseif vals.id.PACKET_COUNT == id then
+      if tree then tree:add_le(dap.fields.pktcnt, buffer(1, 1)) end
+      text = " " .. buffer(1, 1):le_uint() .. " packets"
+    elseif vals.id.PACKET_SIZE == id then
+      if tree then tree:add_le(dap.fields.pktsz, buffer(1, 2)) end
+      text = " " .. buffer(1, 2):le_uint() .. " bytes"
     end
-    if len > 1 then
-      subtree:add_le(dap.fields.usbcom, buffer(2, 1))
-    end
-  elseif vals.id.TEST_DOMAIN_TIMER_ == id then
-
-  elseif vals.id.UART_RECEIVE_BUFFER_SIZE == id then
-    tree:add(dap.fields.uarxbufsz, buffer(1, 4))
-  elseif vals.id.UART_TRANSMIT_BUFFER_SIZE == id then
-    tree:add(dap.fields.uatxbufsz, buffer(1, 4))
-  elseif vals.id.SWO_TRACE_BUFFER_SIZE == id then
-    tree:add(dap.fields.swobufsz, buffer(1, 4))  
-  elseif vals.id.PACKET_COUNT == id then
-    tree:add_le(dap.fields.pktcnt, buffer(1, 1))
-  elseif vals.id.PACKET_SIZE == id then
-    tree:add_le(dap.fields.pktsz, buffer(1, 2))
   end
   
-  return names.id[id]
+  return names.id[id] .. text
 end
 
 local function dissect_host_status(is_request, buffer, tree)
   if is_request then
-    tree:add_le(dap.fields.hs_type, buffer(0, 1))
-    tree:add_le(dap.fields.hs_status, buffer(1, 1))
+    if tree then
+      tree:add_le(dap.fields.hs_type, buffer(0, 1))
+      tree:add_le(dap.fields.hs_status, buffer(1, 1))
+    end
     return names.led[buffer(0, 1):le_uint()]
   else
-    tree:add_le(dap.fields.len, buffer(0, 1))
-    if 0 ~= buffer(0, 1):le_uint() then
-      tree:add_proto_expert_info(dap.experts.zl)
+    if tree then
+      tree:add_le(dap.fields.len, buffer(0, 1))
+      if 0 ~= buffer(0, 1):le_uint() then
+        tree:add_proto_expert_info(dap.experts.zl)
+      end
     end
     return ""
   end
 end
 
 local function dissect_dap_connect(is_request, buffer, tree)
-  tree:add_le(dap.fields.port, buffer(0, 1))
+  if tree then
+    tree:add_le(dap.fields.port, buffer(0, 1))
+  end
   return names.port[buffer(0, 1):le_uint()]
 end
 
@@ -389,9 +417,11 @@ end
 
 local function dissect_transfer_configure(is_request, buffer, tree)
   if is_request then
-    tree:add_le(dap.fields.xfer_ic, buffer(0, 1))
-    tree:add_le(dap.fields.xfer_wr, buffer(1, 2))
-    tree:add_le(dap.fields.xfer_mr, buffer(3, 2))
+    if tree then
+      tree:add_le(dap.fields.xfer_ic, buffer(0, 1))
+      tree:add_le(dap.fields.xfer_wr, buffer(1, 2))
+      tree:add_le(dap.fields.xfer_mr, buffer(3, 2))
+    end
     return ""
   else
     return dissect_response(buffer, tree)
@@ -418,24 +448,30 @@ local function parse_out_transfer(cnt, buffer, tree)
     local is_match = (bit.band(tr, 0x10) ~= 0)
     local is_mask = (bit.band(tr, 0x20) ~= 0)
 
-    local subtree = tree:add_le(dap.fields.xfer_req, buffer(pos, 1))
-    subtree:add_le(dap.fields.xfer_apndp, buffer(pos, 1))
-    subtree:add_le(dap.fields.xfer_rnw, buffer(pos, 1))
-    subtree:add_le(dap.fields.xfer_a23, buffer(pos, 1))
-    subtree:add_le(dap.fields.xfer_match, buffer(pos, 1))
-    subtree:add_le(dap.fields.xfer_mask, buffer(pos, 1))
-    subtree:add_le(dap.fields.xfer_ts, buffer(pos, 1))
+    if tree then
+      local subtree = tree:add_le(dap.fields.xfer_req, buffer(pos, 1))
+      subtree:add_le(dap.fields.xfer_apndp, buffer(pos, 1))
+      subtree:add_le(dap.fields.xfer_rnw, buffer(pos, 1))
+      subtree:add_le(dap.fields.xfer_a23, buffer(pos, 1))
+      subtree:add_le(dap.fields.xfer_match, buffer(pos, 1))
+      subtree:add_le(dap.fields.xfer_mask, buffer(pos, 1))
+      subtree:add_le(dap.fields.xfer_ts, buffer(pos, 1))
+    end
     pos = pos + 1
 
     if is_write then
-      tree:add_le(is_mask and dap.fields.xfer_mskdat or dap.fields.xfer_wdat, buffer(pos, 4))
+      if tree then
+        tree:add_le(is_mask and dap.fields.xfer_mskdat or dap.fields.xfer_wdat, buffer(pos, 4))
+      end
       pos = pos + 4
       if prev_is_write ~= is_write then
         text = text .. "W"
       end
     else
       if is_match then
-        tree:add_le(dap.fields.xfer_mchdat, buffer(pos, 4))
+        if tree then
+          tree:add_le(dap.fields.xfer_mchdat, buffer(pos, 4))
+        end
         pos = pos + 4
       end
       if prev_is_write ~= is_write then
@@ -456,28 +492,35 @@ end
 local function dissect_transfer(is_request, buffer, tree, convinf)
   if is_request then
     if buffer:len() < 2 then
-      tree:add_proto_expert_info(dap.experts.malformed, "Transfer request buffer is too small")
+      if tree then
+        tree:add_proto_expert_info(dap.experts.malformed, "Transfer request buffer is too small")
+      end
       return "Malformed Request"
     end
 
-    tree:add_le(dap.fields.dap_index, buffer(0, 1))
-    tree:add_le(dap.fields.xfer_cnt, buffer(1, 1))
+    local subtree = nil
+    if tree then
+      tree:add_le(dap.fields.dap_index, buffer(0, 1))
+      tree:add_le(dap.fields.xfer_cnt, buffer(1, 1))
+      subtree = tree:add(dap.fields.xfer, buffer(2))
+    end
     local cnt = buffer(1, 1):le_uint()
-    local text = parse_out_transfer(cnt, buffer(2), tree:add(dap.fields.xfer, buffer(2)))
+    local text = parse_out_transfer(cnt, buffer(2), subtree)
     return tostring(cnt) .. " word(s) " .. text
   else
-    tree:add_le(dap.fields.xfer_cnt, buffer(0, 1))
     local cnt = buffer(0, 1):le_uint()
     local ack = bit.band(buffer(1, 1):le_uint(), 0x7)
-    local subtree = tree:add_le(dap.fields.xfer_rsp, buffer(1, 1))
-    subtree:add_le(dap.fields.xfer_ack, buffer(1, 1))
-    subtree:add_le(dap.fields.xfer_perr, buffer(1, 1))
-    subtree:add_le(dap.fields.xfer_miss, buffer(1, 1))
-
-    local pos = 2
-    while pos < buffer:len() do
-      tree:add_le(dap.fields.xfer_rdat, buffer(pos, 4))
-      pos = pos + 4
+    if tree then
+      tree:add_le(dap.fields.xfer_cnt, buffer(0, 1))
+      local subtree = tree:add_le(dap.fields.xfer_rsp, buffer(1, 1))
+      subtree:add_le(dap.fields.xfer_ack, buffer(1, 1))
+      subtree:add_le(dap.fields.xfer_perr, buffer(1, 1))
+      subtree:add_le(dap.fields.xfer_miss, buffer(1, 1))
+      local pos = 2
+      while pos < buffer:len() do
+        tree:add_le(dap.fields.xfer_rdat, buffer(pos, 4))
+        pos = pos + 4
+      end
     end
     return names.ack[ack] .. " " .. tostring(cnt) .. " word(s)"
   end
@@ -485,41 +528,46 @@ end
 
 local function dissect_transfer_block(is_request, buffer, tree, convinf)
   if is_request then
-    tree:add_le(dap.fields.dap_index, buffer(0, 1))
-    tree:add_le(dap.fields.xfer_blk_cnt, buffer(1, 2))
     local cnt = buffer(1, 2):le_uint()
     local is_read = (bit.band(buffer(3, 1):le_uint(), 0x2) ~= 0)
-    local subtree = tree:add_le(dap.fields.xfer_req, buffer(3, 1))
-    subtree:add_le(dap.fields.xfer_apndp, buffer(3, 1))
-    subtree:add_le(dap.fields.xfer_rnw, buffer(3, 1))
-    subtree:add_le(dap.fields.xfer_a23, buffer(3, 1))
-    
+    if tree then
+      tree:add_le(dap.fields.dap_index, buffer(0, 1))
+      tree:add_le(dap.fields.xfer_blk_cnt, buffer(1, 2))
+      local subtree = tree:add_le(dap.fields.xfer_req, buffer(3, 1))
+      subtree:add_le(dap.fields.xfer_apndp, buffer(3, 1))
+      subtree:add_le(dap.fields.xfer_rnw, buffer(3, 1))
+      subtree:add_le(dap.fields.xfer_a23, buffer(3, 1))
+    end
+
     if is_read then
       return tostring(cnt) .. " word(s) " .. "Read"
     end
-    
-    local pos = 4
-    for i = 1, cnt do
-      tree:add_le(dap.fields.xfer_wdat, buffer(pos, 4))
-      pos = pos + 4
+    if tree then    
+      local pos = 4
+      for i = 1, cnt do
+        tree:add_le(dap.fields.xfer_wdat, buffer(pos, 4))
+        pos = pos + 4
+      end
     end
     return tostring(cnt) .. " word(s) " .. "Write"
   else
-    tree:add_le(dap.fields.xfer_blk_cnt, buffer(0, 2))
     local cnt = buffer(0, 2):le_uint()
     local ack = buffer(2, 1):le_uint()
-    local subtree = tree:add_le(dap.fields.xfer_rsp, buffer(2, 1))
-    subtree:add_le(dap.fields.xfer_ack, buffer(2, 1))
-    subtree:add_le(dap.fields.xfer_perr, buffer(2, 1))
-
+    if tree then
+      tree:add_le(dap.fields.xfer_blk_cnt, buffer(0, 2))
+      local subtree = tree:add_le(dap.fields.xfer_rsp, buffer(2, 1))
+      subtree:add_le(dap.fields.xfer_ack, buffer(2, 1))
+      subtree:add_le(dap.fields.xfer_perr, buffer(2, 1))
+    end
     if buffer:len() <= 3 then
       return names.ack[ack] .. " " .. tostring(cnt) .. " word(s) " .. "Write"
     end
-    
-    local pos = 3
-    for i = 1, cnt do
-      tree:add_le(dap.fields.xfer_rdat, buffer(pos, 4))
-      pos = pos + 4
+    if tree then
+      local pos = 3
+      for i = 1, cnt do
+        tree:add_le(dap.fields.xfer_rdat, buffer(pos, 4))
+        pos = pos + 4
+      end
     end
     return names.ack[ack] .. " " .. tostring(cnt) .. " word(s) " .. "Read"
   end
@@ -527,8 +575,10 @@ end
 
 local function dissect_write_abort(is_request, buffer, tree)
   if is_request then
-    tree:add_le(dap.fields.dap_index, buffer(0, 1))
-    tree:add_le(dap.fields.write_abort, buffer(1, 4))
+    if tree then
+      tree:add_le(dap.fields.dap_index, buffer(0, 1))
+      tree:add_le(dap.fields.write_abort, buffer(1, 4))
+    end
     return ""
   else
     return dissect_response(buffer, tree)
@@ -537,7 +587,9 @@ end
 
 local function dissect_dap_delay(is_request, buffer, tree)
   if is_request then
-    tree:add_le(dap.fields.dap_delay, buffer(0, 2))
+    if tree then
+      tree:add_le(dap.fields.dap_delay, buffer(0, 2))
+    end
     return ""
   else
     return dissect_response(buffer, tree)
@@ -547,46 +599,52 @@ end
 local function dissect_dap_reset_target(is_request, buffer, tree)
   if false == is_request then
     local text = dissect_response(buffer, tree)
-    tree:add_le(dap.fields.execute, buffer(1, 1))
+    if tree then
+      tree:add_le(dap.fields.execute, buffer(1, 1))
+    end
     return text
   end
   return ""
 end
 
 local function dissect_swj_pins(is_request, buffer, tree)
-  if is_request then
-    local subtree = tree:add_le(dap.fields.swj_output, buffer(0, 1))
-    subtree:add_le(dap.fields.swj_tck, buffer(0, 1))
-    subtree:add_le(dap.fields.swj_tms, buffer(0, 1))
-    subtree:add_le(dap.fields.swj_tdi, buffer(0, 1))
-    subtree:add_le(dap.fields.swj_tdo, buffer(0, 1))
-    subtree:add_le(dap.fields.swj_ntrst, buffer(0, 1))
-    subtree:add_le(dap.fields.swj_nreset, buffer(0, 1))
-    
-    local subtree = tree:add_le(dap.fields.swj_select, buffer(1, 1))
-    subtree:add_le(dap.fields.swj_tck, buffer(1, 1))
-    subtree:add_le(dap.fields.swj_tms, buffer(1, 1))
-    subtree:add_le(dap.fields.swj_tdi, buffer(1, 1))
-    subtree:add_le(dap.fields.swj_tdo, buffer(1, 1))
-    subtree:add_le(dap.fields.swj_ntrst, buffer(1, 1))
-    subtree:add_le(dap.fields.swj_nreset, buffer(1, 1))
-    
-    tree:add_le(dap.fields.swj_wait, buffer(2, 4))
-  else
-    local subtree = tree:add_le(dap.fields.swj_input, buffer(0, 1))
-    subtree:add_le(dap.fields.swj_tck, buffer(0, 1))
-    subtree:add_le(dap.fields.swj_tms, buffer(0, 1))
-    subtree:add_le(dap.fields.swj_tdi, buffer(0, 1))
-    subtree:add_le(dap.fields.swj_tdo, buffer(0, 1))
-    subtree:add_le(dap.fields.swj_ntrst, buffer(0, 1))
-    subtree:add_le(dap.fields.swj_nreset, buffer(0, 1))
+  if tree then
+    if is_request then
+      local subtree = tree:add_le(dap.fields.swj_output, buffer(0, 1))
+      subtree:add_le(dap.fields.swj_tck, buffer(0, 1))
+      subtree:add_le(dap.fields.swj_tms, buffer(0, 1))
+      subtree:add_le(dap.fields.swj_tdi, buffer(0, 1))
+      subtree:add_le(dap.fields.swj_tdo, buffer(0, 1))
+      subtree:add_le(dap.fields.swj_ntrst, buffer(0, 1))
+      subtree:add_le(dap.fields.swj_nreset, buffer(0, 1))
+      
+      local subtree = tree:add_le(dap.fields.swj_select, buffer(1, 1))
+      subtree:add_le(dap.fields.swj_tck, buffer(1, 1))
+      subtree:add_le(dap.fields.swj_tms, buffer(1, 1))
+      subtree:add_le(dap.fields.swj_tdi, buffer(1, 1))
+      subtree:add_le(dap.fields.swj_tdo, buffer(1, 1))
+      subtree:add_le(dap.fields.swj_ntrst, buffer(1, 1))
+      subtree:add_le(dap.fields.swj_nreset, buffer(1, 1))
+      
+      tree:add_le(dap.fields.swj_wait, buffer(2, 4))
+    else
+      local subtree = tree:add_le(dap.fields.swj_input, buffer(0, 1))
+      subtree:add_le(dap.fields.swj_tck, buffer(0, 1))
+      subtree:add_le(dap.fields.swj_tms, buffer(0, 1))
+      subtree:add_le(dap.fields.swj_tdi, buffer(0, 1))
+      subtree:add_le(dap.fields.swj_tdo, buffer(0, 1))
+      subtree:add_le(dap.fields.swj_ntrst, buffer(0, 1))
+      subtree:add_le(dap.fields.swj_nreset, buffer(0, 1))
+    end
   end
   return ""
 end
 
 local function dissect_swj_clk(is_request, buffer, tree)
   if is_request then
-    tree:add_le(dap.fields.swj_clk, buffer(0, 4))
+    if tree then
+      tree:add_le(dap.fields.swj_clk, buffer(0, 4))
+    end
     return tostring(buffer(0, 4):le_uint()) .. "Hz"
   else
     return dissect_response(buffer, tree)
@@ -595,8 +653,10 @@ end
 
 local function dissect_swj_seq(is_request, buffer, tree)
   if is_request then
-    tree:add_le(dap.fields.swj_seq_cnt, buffer(0, 1))
-    tree:add_le(dap.fields.swj_seq_dat, buffer(1))
+    if tree then
+      tree:add_le(dap.fields.swj_seq_cnt, buffer(0, 1))
+      tree:add_le(dap.fields.swj_seq_dat, buffer(1))
+    end
     return ""
   else
     return dissect_response(buffer, tree)
@@ -605,9 +665,11 @@ end
 
 local function dissect_swd_configure(is_request, buffer, tree)
   if is_request then
-    local subtree = tree:add_le(dap.fields.swd_cfg, buffer(0, 1))
-    subtree:add_le(dap.fields.swd_tcp, buffer(0, 1))
-    subtree:add_le(dap.fields.swd_dp, buffer(0, 1))
+    if tree then
+      local subtree = tree:add_le(dap.fields.swd_cfg, buffer(0, 1))
+      subtree:add_le(dap.fields.swd_tcp, buffer(0, 1))
+      subtree:add_le(dap.fields.swd_dp, buffer(0, 1))
+    end
     return ""
   else
     return dissect_response(buffer, tree)
@@ -616,7 +678,9 @@ end
 
 local function dissect_swo_transport(is_request, buffer, tree)
   if is_request then
-    tree:add_le(dap.fields.swo_trans, buffer(0, 1))
+    if tree then
+      tree:add_le(dap.fields.swo_trans, buffer(0, 1))
+    end
     return ""
   else
     return dissect_response(buffer, tree)
@@ -625,8 +689,11 @@ end
  
 local function dissect_swo_mode(is_request, buffer, tree)
   if is_request then
-    tree:add_le(dap.fields.swo_mode, buffer(0, 1))
-    return ""
+    if tree then
+      tree:add_le(dap.fields.swo_mode, buffer(0, 1))
+    end
+    local mode = buffer(0, 1):le_uint()
+    return mode < 3 and names.swomode[mode] or ""
   else
     return dissect_response(buffer, tree)
   end
@@ -634,17 +701,23 @@ end
 
 local function dissect_swo_baudrate(is_request, buffer, tree)
   if is_request then
-    tree:add_le(dap.fields.swo_baud, buffer(0, 4))
+    if tree then
+      tree:add_le(dap.fields.swo_baud, buffer(0, 4))
+    end
     return tostring(buffer(0, 4):le_uint()) .. "bps"
   else
-    tree:add_le(dap.fields.swo_baud, buffer(0, 4))
+    if tree then
+      tree:add_le(dap.fields.swo_baud, buffer(0, 4))
+    end
     return tostring(buffer(0, 4):le_uint()) .. "bps"
   end
 end
 
 local function dissect_swo_control(is_request, buffer, tree)
   if is_request then
-    tree:add_le(dap.fields.swo_ctrl, buffer(0, 1))
+    if tree then
+      tree:add_le(dap.fields.swo_ctrl, buffer(0, 1))
+    end
     return ""
   else
     return dissect_response(buffer, tree)
@@ -655,19 +728,23 @@ local function dissect_swo_status(is_request, buffer, tree)
   if is_request then
     return ""
   else
-    local subtree = tree:add_le(dap.fields.swo_sts, buffer(0, 1))
-    subtree:add_le(dap.fields.swo_act, buffer(0, 1))
-    subtree:add_le(dap.fields.swo_err, buffer(0, 1))
-    subtree:add_le(dap.fields.swo_ovr, buffer(0, 1))
-    tree:add_le(dap.fields.swo_cnt, buffer(1))
-    return ""
+    if tree then
+      local subtree = tree:add_le(dap.fields.swo_sts, buffer(0, 1))
+      subtree:add_le(dap.fields.swo_act, buffer(0, 1))
+      subtree:add_le(dap.fields.swo_err, buffer(0, 1))
+      subtree:add_le(dap.fields.swo_ovr, buffer(0, 1))
+      tree:add_le(dap.fields.swo_cnt, buffer(1))
+    end
+    return buffer(1):uint() .. " byte(s)"
   end
 end
 
 local function dissect_swd_sequence(is_request, buffer, tree)
   if is_request then
-    tree:add_le(dap.fields.swj_seq_cnt, buffer(0, 1))
-    tree:add_le(dap.fields.swj_seq_dat, buffer(1))
+    if tree then
+      tree:add_le(dap.fields.swj_seq_cnt, buffer(0, 1))
+      tree:add_le(dap.fields.swj_seq_dat, buffer(1))
+    end
     return ""
   else
     return dissect_response(buffer, tree)
@@ -676,7 +753,9 @@ end
 
 local function dissect_swo_extended_status(is_request, buffer, tree)
   if is_request then
-    tree:add_le(dap.fields.swo_ext_sts, buffer(0, 1))
+    if tree then
+      tree:add_le(dap.fields.swo_ext_sts, buffer(0, 1))
+    end
     return ""
   else
    -- TODO: Add expert info if necessary
@@ -871,11 +950,7 @@ local function dissect_swo_data(is_request, buffer, tree)
 end
 
 local function dissect_trace(tvb, pinfo, tree)
-  local subtree
-  if pinfo.visited then
-    pinfo.cols.protocol = "USBDAP"
-    subtree = tree:add(dap, ltvb, "CMSIS-DAP")
-  end
+  local subtree = pinfo.visited and tree:add(dap, tvb, "CMSIS-DAP") or nil
   local dev_adr = usb_fields.device_address().value
   local frg = get_fragment(dev_adr)
   local seq_num = get_seq_num(frg, pinfo.number, pinfo.visited)
@@ -915,9 +990,8 @@ local function dissect_trace(tvb, pinfo, tree)
   if pinfo.visited == false and offset < ltvb:len() then
     fragments[dev_adr].rem[pinfo.number] = ltvb:bytes(offset)
   end
-  if pinfo.visited then
-    pinfo.cols.info = "SWO_Data " .. cnt .. " packet(s) " .. pkts
-  end
+  pinfo.cols.protocol = "USBDAP"
+  pinfo.cols.info = "SWO_Data " .. cnt .. " packet(s) " .. pkts
 end
 
 function dap.dissector(buffer, pinfo, tree)
@@ -1013,10 +1087,10 @@ function dap.dissector(buffer, pinfo, tree)
     end
   end
   pinfo.cols.protocol = "USBDAP"
-  local subtree = tree:add(dap, buffer(), "CMSIS-DAP")
+  local subtree = pinfo.visited and tree:add(dap, buffer(), "CMSIS-DAP") or nil
   
   -- Warning for packet loss
-  if nil == seq_num then
+  if nil == seq_num and subtree then
     subtree:add_proto_expert_info(dap.experts.lost)
   end
 
@@ -1027,20 +1101,21 @@ function dap.dissector(buffer, pinfo, tree)
     command = names.command[cmd]
   end
   
-  if is_request then
-    info_text = command .. " Request "
-    if seq_num ~= nil and convlist[dev_adr].res[seq_num] ~= nil then
-      subtree:add(dap.fields.res, convlist[dev_adr].res[seq_num])
+  if subtree then
+    if is_request then
+      info_text = command .. " Request "
+      if seq_num ~= nil and convlist[dev_adr].res[seq_num] ~= nil then
+        subtree:add(dap.fields.res, convlist[dev_adr].res[seq_num])
+      end
+    else
+      info_text = command .. " Response "
+      if seq_num ~= nil then 
+        subtree:add(dap.fields.req, convlist[dev_adr].req[seq_num])
+      end
     end
-  else
-    info_text = command .. " Response "
-    if seq_num ~= nil then 
-      subtree:add(dap.fields.req, convlist[dev_adr].req[seq_num])
-    end
+    -- Command processing
+    subtree:add_le(dap.fields.cmd, buffer(0, 1))
   end
-
-  -- Command processing
-  subtree:add_le(dap.fields.cmd, buffer(0, 1))
   
   -- Processing by command
   if cmd == vals.command.DAP_INFO then

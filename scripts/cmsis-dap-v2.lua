@@ -517,9 +517,14 @@ local function dissect_transfer(is_request, buffer, tree, convinf)
       subtree:add_le(dap.fields.xfer_perr, buffer(1, 1))
       subtree:add_le(dap.fields.xfer_miss, buffer(1, 1))
       local pos = 2
-      while pos < buffer:len() do
-        tree:add_le(dap.fields.xfer_rdat, buffer(pos, 4))
-        pos = pos + 4
+      for _ = 1, cnt do
+        if pos + 4 <= buffer:len() then
+          tree:add_le(dap.fields.xfer_rdat, buffer(pos, 4))
+          pos = pos + 4
+        else
+          tree:add_proto_expert_info(dap.experts.malformed, "Response buffer too small for declared read data count")
+          break
+        end
       end
     end
     return names.ack[ack] .. " " .. tostring(cnt) .. " word(s)"

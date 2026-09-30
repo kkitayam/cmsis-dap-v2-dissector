@@ -8,7 +8,7 @@ local tostr   = tostring
 
 local convlist = {} -- List of conversations
 local fragments = {} -- Reassembled fragments
-local dap = Proto("USBDAP", "USB CMSIS-DAP protocol")
+local dap = Proto("cmsis_dap", "USB CMSIS-DAP protocol")
 
 local usb_fields = {
   device_address   = Field.new("usb.device_address"),
@@ -162,7 +162,7 @@ dap.fields.dev_name = ProtoField.string("cmsis_dap.info.target.device.name", "Ta
 dap.fields.board_vendor = ProtoField.string("cmsis_dap.info.target.board.vendor", "Target Board Vendor")
 dap.fields.board_name = ProtoField.string("cmsis_dap.info.target.board.name", "Target Board Name")
 dap.fields.fw_version = ProtoField.string("cmsis_dap.info.firmware.version", "Product Firmware Version")
-dap.fields.caps = ProtoField.uint8("cmsis_dap.info.caps", "Capabilities", base.HEX)
+dap.fields.caps = ProtoField.uint16("cmsis_dap.info.caps", "Capabilities", base.HEX)
 dap.fields.impswd = ProtoField.uint8("cmsis_dap.info.swd", "SWD", base.HEX, names.imp, 0x1)
 dap.fields.impjtag = ProtoField.uint8("cmsis_dap.info.jtag", "JTAG", base.HEX, names.imp, 0x2)
 dap.fields.swoua = ProtoField.uint8("cmsis_dap.info.swo_uart", "SWO UART", base.HEX, names.imp, 0x4)
@@ -348,9 +348,9 @@ local function dissect_info(is_request, buffer, tree, convinf)
       if tree then tree:add(dap.fields.fw_version, buffer(1)) end
       text = " " .. buffer(1):string()
     elseif vals.id.CAPABILITIES == id then
-      if tree then
-        local subtree = tree:add_le(dap.fields.caps, buffer(1))
-        if len > 0 then
+      if len >= 2 then
+        if tree then
+          local subtree = tree:add_le(dap.fields.caps, buffer(1, 2))
           subtree:add_le(dap.fields.impswd, buffer(1, 1))
           subtree:add_le(dap.fields.impjtag, buffer(1, 1))
           subtree:add_le(dap.fields.swoua, buffer(1, 1))
@@ -359,21 +359,22 @@ local function dissect_info(is_request, buffer, tree, convinf)
           subtree:add_le(dap.fields.tmr, buffer(1, 1))
           subtree:add_le(dap.fields.swostm, buffer(1, 1))
           subtree:add_le(dap.fields.ua, buffer(1, 1))
-        end
-        if len > 1 then
           subtree:add_le(dap.fields.usbcom, buffer(2, 1))
         end
+      elseif tree then
+        tree:add_proto_expert_info(dap.experts.malformed,
+          "Capabilities Info response must contain 2 bytes")
       end
     elseif vals.id.TEST_DOMAIN_TIMER == id then
 
     elseif vals.id.UART_RECEIVE_BUFFER_SIZE == id then
-      if tree then tree:add(dap.fields.uarxbufsz, buffer(1, 4)) end
+      if tree then tree:add_le(dap.fields.uarxbufsz, buffer(1, 4)) end
       text = " " .. buffer(1, 4):le_uint() .. " bytes"
     elseif vals.id.UART_TRANSMIT_BUFFER_SIZE == id then
-      if tree then tree:add(dap.fields.uatxbufsz, buffer(1, 4)) end
+      if tree then tree:add_le(dap.fields.uatxbufsz, buffer(1, 4)) end
       text = " " .. buffer(1, 4):le_uint() .. " bytes"
     elseif vals.id.SWO_TRACE_BUFFER_SIZE == id then
-      if tree then tree:add(dap.fields.swobufsz, buffer(1, 4)) end
+      if tree then tree:add_le(dap.fields.swobufsz, buffer(1, 4)) end
       text = " " .. buffer(1, 4):le_uint() .. " bytes"
     elseif vals.id.PACKET_COUNT == id then
       if tree then tree:add_le(dap.fields.pktcnt, buffer(1, 1)) end
@@ -966,7 +967,7 @@ local function dissect_swo_data(is_request, buffer, tree)
 end
 
 local function dissect_trace(tvb, pinfo, tree)
-  local subtree = pinfo.visited and tree:add(dap, tvb, "CMSIS-DAP") or nil
+  local subtree = tree and tree:add(dap, tvb, "CMSIS-DAP") or nil
   local dev_adr = usb_fields.device_address().value
   local frg = get_fragment(dev_adr)
   local seq_num = get_seq_num(frg, pinfo.number, pinfo.visited)
@@ -1033,6 +1034,7 @@ function dap.dissector(buffer, pinfo, tree)
         seq = {}, -- Mapping from frame number to sequence number
         req = {}, -- Mapping from sequence number to request frame number
         res = {}, -- Mapping from sequence number to response frame number
+        res_next = {}, -- Next request sequence to match for each command
         inf = {}, -- Command information (used for response buffer analysis)
       }
     end
@@ -1051,7 +1053,7 @@ function dap.dissector(buffer, pinfo, tree)
           convlist[dev_adr].ep_swo = ep_adr
         end
         if convlist[dev_adr].ep_swo == ep_adr then
-          dissect_trace(buffer, pinfo, nil)
+          dissect_trace(buffer, pinfo, tree)
           return true
         else
           return false
@@ -1066,29 +1068,25 @@ function dap.dissector(buffer, pinfo, tree)
       convlist[dev_adr].inf[seq_num] = {cmd = cmd}
     else
       -- Response processing
-      local tentative_num = #convlist[dev_adr].res + 1
-      -- Search for the same command
       local num_of_reqs = #convlist[dev_adr].req
+      local tentative_num = convlist[dev_adr].res_next[cmd] or 1
       while tentative_num <= num_of_reqs do
-        if cmd == convlist[dev_adr].inf[tentative_num].cmd then
+        if convlist[dev_adr].res[tentative_num] == nil and
+           cmd == convlist[dev_adr].inf[tentative_num].cmd then
           break
         end
         tentative_num = tentative_num + 1
       end
       
       if tentative_num <= num_of_reqs then
-        table.insert(convlist[dev_adr].res, pinfo.number)
-        seq_num = #convlist[dev_adr].res
-        if cmd == convlist[dev_adr].inf[seq_num].cmd then
-          convlist[dev_adr].seq[pinfo.number] = seq_num
-        else
-          -- Loss of response packet
-          convlist[dev_adr].seq[pinfo.number] = -1
-          convlist[dev_adr].seq[convlist[dev_adr].req[seq_num]] = -1
-        end
+        seq_num = tentative_num
+        convlist[dev_adr].res[seq_num] = pinfo.number
+        convlist[dev_adr].seq[pinfo.number] = seq_num
+        convlist[dev_adr].res_next[cmd] = seq_num + 1
       else
         -- Loss of request packet
         convlist[dev_adr].seq[pinfo.number] = -1
+        convlist[dev_adr].res_next[cmd] = num_of_reqs + 1
       end
     end
   else
@@ -1106,7 +1104,7 @@ function dap.dissector(buffer, pinfo, tree)
     end
   end
   pinfo.cols.protocol = "USBDAP"
-  local subtree = pinfo.visited and tree:add(dap, buffer(), "CMSIS-DAP") or nil
+  local subtree = tree and tree:add(dap, buffer(), "CMSIS-DAP") or nil
   
   -- Warning for packet loss
   if nil == seq_num and subtree then

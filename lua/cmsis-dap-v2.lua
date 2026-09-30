@@ -12,9 +12,17 @@ local dap = Proto("cmsis_dap", "USB CMSIS-DAP protocol")
 
 local usb_fields = {
   device_address   = Field.new("usb.device_address"),
+  bus_id           = Field.new("usb.bus_id"),
   endpoint_address = Field.new("usb.endpoint_address"),
   endpointdir      = Field.new("usb.endpoint_address.direction"),
 }
+
+local function get_conversation_key()
+  local device = usb_fields.device_address()
+  if not device then return nil end
+  local bus = usb_fields.bus_id()
+  return tostr(bus and bus.value or 0) .. ":" .. tostr(device.value)
+end
 
 local vals = {
   id = {
@@ -282,6 +290,61 @@ local function get_fragment(dev_adr)
     }
   end
   return fragments[dev_adr]
+end
+
+local request_minimum_length = {
+  [0] = 2, [1] = 3, [2] = 2, [3] = 1, [4] = 6, [5] = 3, [6] = 5,
+  [7] = 1, [8] = 6, [9] = 3, [10] = 1, [16] = 6, [17] = 5,
+  [18] = 2, [19] = 2, [23] = 2, [24] = 2, [25] = 5, [26] = 2,
+  [27] = 1, [28] = 3, [29] = 2,
+}
+
+local response_minimum_length = {
+  [0] = 2, [1] = 2, [2] = 2, [3] = 2, [4] = 2, [5] = 3, [6] = 4,
+  [7] = 2, [8] = 2, [9] = 2, [10] = 3, [16] = 3, [17] = 2,
+  [18] = 2, [19] = 2, [23] = 2, [24] = 2, [25] = 5, [26] = 2,
+  [27] = 6, [28] = 4, [29] = 2, [30] = 2,
+}
+
+local function is_valid_command(buffer, is_request)
+  if buffer:len() == 0 then return false end
+  local command = buffer(0, 1):uint()
+  local minimum = (is_request and request_minimum_length or response_minimum_length)[command]
+  return minimum ~= nil and buffer:len() >= minimum
+end
+
+local function usb_bulk_heuristic(buffer, pinfo, tree)
+  local conv_key = get_conversation_key()
+  if not conv_key or buffer:len() == 0 then return false end
+
+  local endpoint_field = usb_fields.endpoint_address()
+  local direction_field = usb_fields.endpointdir()
+  if not endpoint_field then return false end
+  local endpoint = endpoint_field.value
+  local is_request = direction_field and direction_field.value == 0 or
+    bit.band(endpoint, 0x80) == 0
+
+  local conversation = convlist[conv_key]
+  if conversation then
+    if is_request then
+      if conversation and conversation.ep_out and endpoint ~= conversation.ep_out then
+        return false
+      end
+      if not is_valid_command(buffer, true) then return false end
+    elseif conversation.ep_in and endpoint ~= conversation.ep_in then
+      if endpoint == conversation.ep_out or
+          (conversation.ep_swo and conversation.ep_swo ~= endpoint) then
+        return false
+      end
+    elseif not is_valid_command(buffer, false) then
+      return false
+    end
+  else
+    if not is_request or not is_valid_command(buffer, true) then return false end
+  end
+
+  dap.dissector(buffer, pinfo, tree)
+  return true
 end
 
 local function get_seq_num(frg, frame_num, visited)
@@ -968,7 +1031,8 @@ end
 
 local function dissect_trace(tvb, pinfo, tree)
   local subtree = tree and tree:add(dap, tvb, "CMSIS-DAP") or nil
-  local dev_adr = usb_fields.device_address().value
+  local dev_adr = get_conversation_key()
+  if not dev_adr then return false end
   local frg = get_fragment(dev_adr)
   local seq_num = get_seq_num(frg, pinfo.number, pinfo.visited)
   local ltvb = tvb
@@ -1018,7 +1082,8 @@ function dap.dissector(buffer, pinfo, tree)
   local len = buffer:len()
   if len == 0 then return end
 
-  local dev_adr = usb_fields.device_address().value
+  local dev_adr = get_conversation_key()
+  if not dev_adr then return false end
   local ep_adr = usb_fields.endpoint_address().value
   local is_request = (usb_fields.endpointdir().value == 0)
 
@@ -1168,5 +1233,9 @@ cmd_handlers = {
   [vals.command.DAP_SWO_EXTENDED_STATUS]=function(rq, b, t)     return dissect_swo_extended_status(rq, b, t) end,
 }
 
--- Dissector registration
-DissectorTable.get("usb.bulk"):add(0xff, dap)
+function dap.init()
+  convlist = {}
+  fragments = {}
+end
+
+dap:register_heuristic("usb.bulk", usb_bulk_heuristic)

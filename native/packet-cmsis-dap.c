@@ -467,6 +467,7 @@ get_interface_identity(usb_device_identity_t *identity, guint8 interface_num)
 static device_state_t *
 get_device_state(guint16 bus_id, guint32 device_address, guint8 interface_num)
 {
+    /* USB endpoint conversations are separate; share command state by interface. */
     guint32 key_value = ((guint32)bus_id << 15) |
         ((device_address & 0x7f) << 8) | interface_num;
     gpointer key = GUINT_TO_POINTER(key_value + 1);
@@ -484,8 +485,9 @@ get_device_state(guint16 bus_id, guint32 device_address, guint8 interface_num)
 }
 
 static guint32
-get_usb_device_address(packet_info *pinfo, guint16 *bus_id)
+get_usb_device_address_for_identity(packet_info *pinfo, guint16 *bus_id)
 {
+    /* The descriptor postdissector has no urb_info_t to read USB addresses from. */
     const address *addresses[] = { &pinfo->src, &pinfo->dst };
     guint i;
 
@@ -596,7 +598,10 @@ dissect_usb_identity(tvbuff_t *tvb _U_, packet_info *pinfo, proto_tree *tree,
     guint i;
     guint interface_count;
 
-    device_address = get_usb_device_address(pinfo, &bus_id);
+    if (PINFO_FD_VISITED(pinfo)) {
+        return 0;
+    }
+    device_address = get_usb_device_address_for_identity(pinfo, &bus_id);
     if (device_address == 0 || tree == NULL) {
         return 0;
     }
@@ -1589,6 +1594,18 @@ is_cmsis_dap_command(tvbuff_t *tvb, gboolean is_request)
     return minimum > 0 && length >= minimum;
 }
 
+static gboolean
+urb_is_request(const urb_info_t *urb)
+{
+    if (urb->direction == P2P_DIR_SENT) {
+        return TRUE;
+    }
+    if (urb->direction == P2P_DIR_RECV) {
+        return FALSE;
+    }
+    return (urb->endpoint & 0x80) == 0;
+}
+
 static int
 interface_string_match(const usb_device_identity_t *identity,
     const interface_identity_t *interface)
@@ -1618,32 +1635,24 @@ dissect_cmsis_dap_heur(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
     void *data)
 {
     urb_info_t *urb = (urb_info_t *)data;
-    usb_conv_info_t *usb_info = urb != NULL ? urb->conv : NULL;
+    usb_conv_info_t *usb_info;
     device_state_t *state;
     interface_identity_t *interface;
-    guint32 device_address;
     guint32 endpoint;
-    guint16 bus_id;
     guint8 interface_num;
     gboolean is_request;
     gboolean has_interface_descriptor;
     gboolean has_matching_string;
     int string_match;
 
-    if (tvb_captured_length(tvb) == 0 || usb_info == NULL) {
+    if (urb == NULL || urb->conv == NULL) {
         return FALSE;
     }
-    device_address = get_usb_device_address(pinfo, &bus_id);
-    if (device_address == 0) {
+    usb_info = urb->conv;
+    if (tvb_captured_length(tvb) == 0) {
         return FALSE;
     }
-    interface_num = usb_info->interfaceNum;
-    state = get_device_state(bus_id, device_address, interface_num);
-    interface = (interface_identity_t *)wmem_map_lookup(state->identity->interfaces,
-        GUINT_TO_POINTER((guint)interface_num + 1));
-    has_interface_descriptor = interface != NULL && interface->descriptor_seen;
-    if (usb_info->interfaceClass != 0 &&
-        usb_info->interfaceClass != USB_UNKNOWN_INTERFACE_VALUE &&
+    if (usb_info->interfaceClass != USB_UNKNOWN_INTERFACE_VALUE &&
         (usb_info->interfaceClass != CMSIS_DAP_USB_CLASS ||
          (usb_info->interfaceSubclass != USB_UNKNOWN_INTERFACE_VALUE &&
           usb_info->interfaceSubclass != CMSIS_DAP_USB_SUBCLASS) ||
@@ -1651,6 +1660,11 @@ dissect_cmsis_dap_heur(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
           usb_info->interfaceProtocol != CMSIS_DAP_USB_PROTOCOL))) {
         return FALSE;
     }
+    interface_num = usb_info->interfaceNum;
+    state = get_device_state(urb->bus_id, urb->device_address, interface_num);
+    interface = (interface_identity_t *)wmem_map_lookup(state->identity->interfaces,
+        GUINT_TO_POINTER((guint)interface_num + 1));
+    has_interface_descriptor = interface != NULL && interface->descriptor_seen;
     if (has_interface_descriptor &&
         (interface->interface_class != CMSIS_DAP_USB_CLASS ||
          interface->interface_subclass != CMSIS_DAP_USB_SUBCLASS ||
@@ -1667,17 +1681,13 @@ dissect_cmsis_dap_heur(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
         return FALSE;
     }
     has_matching_string = string_match > 0;
-    if (has_matching_string) {
+    if (has_matching_string && !PINFO_FD_VISITED(pinfo)) {
         state->is_cmsis_dap = TRUE;
         state->matched_by = "string";
     }
 
-    is_request = pinfo->p2p_dir == P2P_DIR_SENT;
-    endpoint = is_request ? pinfo->destport : pinfo->srcport;
-    if (pinfo->p2p_dir != P2P_DIR_SENT && pinfo->p2p_dir != P2P_DIR_RECV) {
-        endpoint = pinfo->destport != NO_ENDPOINT ? pinfo->destport : pinfo->srcport;
-        is_request = (endpoint & 0x80) == 0;
-    }
+    endpoint = urb->endpoint;
+    is_request = urb_is_request(urb);
 
     if (state->is_cmsis_dap) {
         if (is_request) {
@@ -1689,13 +1699,18 @@ dissect_cmsis_dap_heur(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
             }
         } else if (state->have_in_endpoint && endpoint != state->in_endpoint &&
             endpoint != state->out_endpoint) {
-            state->have_trace_endpoint = TRUE;
-            state->trace_endpoint = (guint8)endpoint;
+            if (!PINFO_FD_VISITED(pinfo)) {
+                state->have_trace_endpoint = TRUE;
+                state->trace_endpoint = (guint8)endpoint;
+            }
         } else if (!is_cmsis_dap_command(tvb, FALSE)) {
             return FALSE;
         }
     } else {
         if (!is_request || !is_cmsis_dap_command(tvb, TRUE)) {
+            return FALSE;
+        }
+        if (PINFO_FD_VISITED(pinfo)) {
             return FALSE;
         }
         state->is_cmsis_dap = TRUE;
@@ -1707,6 +1722,7 @@ dissect_cmsis_dap_heur(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
 static int
 dissect_cmsis_dap(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data)
 {
+    urb_info_t *urb = (urb_info_t *)data;
     guint length = tvb_captured_length(tvb);
     guint8 command;
     guint32 device_address;
@@ -1723,26 +1739,21 @@ dissect_cmsis_dap(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *dat
     gchar operation[160] = "";
     gchar info[256];
     const gchar *command_name;
-    urb_info_t *urb = (urb_info_t *)data;
-    usb_conv_info_t *usb_info = urb != NULL ? urb->conv : NULL;
 
-    if (length == 0) {
+    if (urb == NULL || urb->conv == NULL || length == 0) {
         return 0;
     }
-    device_address = get_usb_device_address(pinfo, &bus_id);
-    if (usb_info == NULL) {
-        return 0;
-    }
-    is_request = pinfo->p2p_dir == P2P_DIR_SENT;
-    endpoint = is_request ? pinfo->destport : pinfo->srcport;
-    if (pinfo->p2p_dir != P2P_DIR_SENT && pinfo->p2p_dir != P2P_DIR_RECV) {
-        endpoint = pinfo->destport != NO_ENDPOINT ? pinfo->destport : pinfo->srcport;
-        is_request = (endpoint & 0x80) == 0;
-    }
-    state = get_device_state(bus_id, device_address, usb_info->interfaceNum);
+    device_address = urb->device_address;
+    bus_id = urb->bus_id;
+    endpoint = urb->endpoint;
+    is_request = urb_is_request(urb);
+    state = get_device_state(bus_id, device_address, urb->conv->interfaceNum);
     frame = (frame_record_t *)wmem_map_lookup(state->frames, GUINT_TO_POINTER(pinfo->num));
 
     if (frame == NULL) {
+        if (PINFO_FD_VISITED(pinfo)) {
+            return 0;
+        }
         frame = wmem_new0(wmem_file_scope(), frame_record_t);
         frame->command = tvb_get_uint8(tvb, 0);
         command = frame->command;

@@ -18,8 +18,6 @@
 #define USB_TRANSFER_TYPE_BULK 0x02
 #define USB_UNKNOWN_INTERFACE_VALUE 0xffff
 #define USB_DESCRIPTOR_STRING 0x03
-#define USB_REQUEST_SET_ADDRESS 5
-#define USB_REQUEST_SET_CONFIGURATION 9
 
 enum {
     CMD_INFO = 0,
@@ -248,8 +246,6 @@ static int hf_usb_interface_protocol;
 static int hf_usb_interface_string;
 static int hf_usb_endpoint_address;
 static int hf_usb_endpoint_transfer;
-static int hf_usb_setup_request;
-static int hf_usb_setup_value;
 
 static dissector_handle_t usb_identity_handle;
 
@@ -545,34 +541,6 @@ get_device_state(uint16_t bus_id, uint32_t device_address, uint8_t interface_num
     return state;
 }
 
-static void
-reset_device_state(uint16_t bus_id, uint32_t device_address, bool reset_identity)
-{
-    if (reset_identity) {
-        wmem_map_remove(usb_device_identities,
-            device_identity_key(bus_id, device_address));
-    }
-    usb_device_identity_t *identity = get_device_identity(bus_id, device_address);
-
-    for (unsigned interface_num = 0; interface_num <= UINT8_MAX; interface_num++) {
-        device_state_t *state = lookup_device_state(bus_id, device_address,
-            (uint8_t)interface_num);
-        if (state == NULL) {
-            continue;
-        }
-        state->requests = wmem_map_new(wmem_file_scope(), g_direct_hash, g_direct_equal);
-        memset(state->response_cursor, 0, sizeof(state->response_cursor));
-        state->request_count = 0;
-        state->identity = identity;
-        state->is_cmsis_dap = false;
-        state->have_out_endpoint = false;
-        state->have_in_endpoint = false;
-        state->have_trace_endpoint = false;
-        state->trace_tail_length = 0;
-        state->trace_tail_frame = 0;
-    }
-}
-
 static uint32_t
 get_usb_device_address_for_identity(packet_info *pinfo, uint16_t *bus_id)
 {
@@ -665,25 +633,6 @@ dissect_usb_identity(tvbuff_t *tvb _U_, packet_info *pinfo, proto_tree *tree,
     }
     uint16_t bus_id;
     uint32_t device_address = get_usb_device_address_for_identity(pinfo, &bus_id);
-    GPtrArray *setup_requests = usb_field_values(tree, hf_usb_setup_request);
-    if (usb_field_count(setup_requests) > 0) {
-        uint32_t setup_request = usb_field_uint(setup_requests, 0);
-        if (setup_request == USB_REQUEST_SET_ADDRESS) {
-            GPtrArray *setup_values = usb_field_values(tree, hf_usb_setup_value);
-            if (usb_field_count(setup_values) > 0) {
-                reset_device_state(bus_id, usb_field_uint(setup_values, 0) & 0x7f, true);
-            }
-            usb_field_values_free(setup_values);
-            usb_field_values_free(setup_requests);
-            return 0;
-        }
-        if (setup_request == USB_REQUEST_SET_CONFIGURATION && device_address != 0) {
-            reset_device_state(bus_id, device_address, false);
-            usb_field_values_free(setup_requests);
-            return 0;
-        }
-    }
-    usb_field_values_free(setup_requests);
     GPtrArray *descriptor_types = usb_field_values(tree, hf_usb_descriptor_type);
     GPtrArray *request_frames = usb_field_values(tree, hf_usb_request_in);
     GPtrArray *strings = usb_field_values(tree, hf_usb_string);
@@ -2232,7 +2181,7 @@ void
 proto_reg_handoff_cmsis_dap(void)
 {
     GArray *wanted_hfids;
-    int usb_hfids[14];
+    int usb_hfids[12];
     unsigned i;
 
     hf_usb_descriptor_index = proto_registrar_get_id_byname("usb.DescriptorIndex");
@@ -2247,8 +2196,6 @@ proto_reg_handoff_cmsis_dap(void)
     hf_usb_interface_string = proto_registrar_get_id_byname("usb.iInterface");
     hf_usb_endpoint_address = proto_registrar_get_id_byname("usb.bEndpointAddress");
     hf_usb_endpoint_transfer = proto_registrar_get_id_byname("usb.bmAttributes.transfer");
-    hf_usb_setup_request = proto_registrar_get_id_byname("usb.setup.bRequest");
-    hf_usb_setup_value = proto_registrar_get_id_byname("usb.setup.wValue");
     usb_hfids[0] = hf_usb_descriptor_index;
     usb_hfids[1] = hf_usb_descriptor_type;
     usb_hfids[2] = hf_usb_request_in;
@@ -2261,8 +2208,6 @@ proto_reg_handoff_cmsis_dap(void)
     usb_hfids[9] = hf_usb_interface_string;
     usb_hfids[10] = hf_usb_endpoint_address;
     usb_hfids[11] = hf_usb_endpoint_transfer;
-    usb_hfids[12] = hf_usb_setup_request;
-    usb_hfids[13] = hf_usb_setup_value;
 
     heur_dissector_add("usb.bulk", dissect_cmsis_dap_heur, "CMSIS-DAP v2 USB bulk",
         "cmsis_dap_usb_bulk", proto_cmsis_dap, HEURISTIC_ENABLE);

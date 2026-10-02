@@ -261,11 +261,6 @@ typedef struct {
 } transfer_operation_t;
 
 typedef struct {
-    uint8_t bit_count;
-    bool is_input;
-} swd_sequence_t;
-
-typedef struct {
     bool accepted;
 } heuristic_decision_t;
 
@@ -1202,6 +1197,13 @@ add_swj_pin_bits(proto_tree *tree, tvbuff_t *tvb, unsigned offset)
     proto_tree_add_item(tree, hf_swj_nreset, tvb, offset, 1, ENC_NA);
 }
 
+static unsigned
+swd_sequence_bit_count(uint8_t sequence_info)
+{
+    unsigned bit_count = sequence_info & 0x3f;
+    return bit_count == 0 ? 64 : bit_count;
+}
+
 static void
 dissect_swd_sequence(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
     unsigned payload_offset, bool is_request, request_record_t *request, char *summary,
@@ -1222,7 +1224,7 @@ dissect_swd_sequence(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
         unsigned offset = payload_offset + 1;
         if (request != NULL && !PINFO_FD_VISITED(pinfo)) {
             request->swd_sequences = sequence_count > 0 ?
-                new_file_scope_garray(sizeof(swd_sequence_t), sequence_count) : NULL;
+                new_file_scope_garray(sizeof(uint8_t), sequence_count) : NULL;
         }
         for (unsigned i = 0; i < sequence_count; i++) {
             if (offset >= length) {
@@ -1231,12 +1233,9 @@ dissect_swd_sequence(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
             }
             uint8_t sequence_info = tvb_get_uint8(tvb, offset);
             bool is_input = (sequence_info & 0x80) != 0;
-            unsigned bit_count = sequence_info & 0x3f;
+            unsigned bit_count = swd_sequence_bit_count(sequence_info);
             unsigned data_length;
 
-            if (bit_count == 0) {
-                bit_count = 64;
-            }
             data_length = (bit_count + 7) / 8;
             if (tree != NULL) {
                 proto_tree_add_item(tree, hf_swd_sequence_info, tvb, offset, 1, ENC_NA);
@@ -1254,11 +1253,7 @@ dissect_swd_sequence(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
                 offset += data_length;
             }
             if (request != NULL && !PINFO_FD_VISITED(pinfo)) {
-                swd_sequence_t sequence = {
-                    .bit_count = (uint8_t)bit_count,
-                    .is_input = is_input
-                };
-                g_array_append_val(request->swd_sequences, sequence);
+                g_array_append_val(request->swd_sequences, sequence_info);
             }
         }
         g_snprintf(summary, summary_length, "%u sequence(s)", sequence_count);
@@ -1273,12 +1268,11 @@ dissect_swd_sequence(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
     unsigned offset = payload_offset + 1;
     if (request != NULL && request->swd_sequences != NULL) {
         for (unsigned i = 0; i < request->swd_sequences->len; i++) {
-            const swd_sequence_t *sequence =
-                &g_array_index(request->swd_sequences, swd_sequence_t, i);
-            if (!sequence->is_input) {
+            uint8_t sequence_info = g_array_index(request->swd_sequences, uint8_t, i);
+            if ((sequence_info & 0x80) == 0) {
                 continue;
             }
-            unsigned data_length = (sequence->bit_count + 7) / 8;
+            unsigned data_length = (swd_sequence_bit_count(sequence_info) + 7) / 8;
             if (length - offset < data_length) {
                 add_malformed(tree, pinfo, tvb, "SWD sequence input data is truncated");
                 break;

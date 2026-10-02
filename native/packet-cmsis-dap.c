@@ -317,7 +317,6 @@ typedef struct {
     wmem_map_t *requests;
     wmem_map_t *frames;
     usb_device_identity_t *identity;
-    uint8_t interface_num;
     uint32_t request_count;
     uint32_t response_cursor[256];
     bool have_out_endpoint;
@@ -332,7 +331,6 @@ typedef struct {
     uint32_t trace_tail_frame;
 } device_state_t;
 
-static wmem_map_t *device_states;
 static wmem_map_t *usb_device_identities;
 
 #define HF_UINT8(hf, label, abbrev, display, vals, mask) \
@@ -512,31 +510,32 @@ get_interface_identity(usb_device_identity_t *identity, uint8_t interface_num)
 }
 
 static device_state_t *
-lookup_device_state(uint16_t bus_id, uint32_t device_address, uint8_t interface_num)
+lookup_conv_state(urb_info_t *urb)
 {
-    uint32_t key_value = ((uint32_t)bus_id << 15) |
-        ((device_address & 0x7f) << 8) | interface_num;
-    void *key = GUINT_TO_POINTER(key_value + 1);
-    return (device_state_t *)wmem_map_lookup(device_states, key);
+    if (urb == NULL || urb->conv == NULL) {
+        return NULL;
+    }
+    return (device_state_t *)urb->conv->class_data;
 }
 
 static device_state_t *
-get_device_state(uint16_t bus_id, uint32_t device_address, uint8_t interface_num)
+get_conv_state(urb_info_t *urb)
 {
-    /* USB endpoint conversations are separate; share command state by interface. */
-    device_state_t *state = lookup_device_state(bus_id, device_address, interface_num);
-
+    if (urb == NULL || urb->conv == NULL) {
+        return NULL;
+    }
+    device_state_t *state = lookup_conv_state(urb);
     if (state == NULL) {
-        uint32_t key_value = ((uint32_t)bus_id << 15) |
-            ((device_address & 0x7f) << 8) | interface_num;
-        void *key = GUINT_TO_POINTER(key_value + 1);
-
+        /*
+         * Enumeration makes the USB conversation shared by an interface's
+         * endpoints. Keep state across SET_CONFIGURATION; later passes need
+         * the first-pass records.
+         */
         state = wmem_new0(wmem_file_scope(), device_state_t);
         state->requests = wmem_map_new(wmem_file_scope(), g_direct_hash, g_direct_equal);
         state->frames = wmem_map_new(wmem_file_scope(), g_direct_hash, g_direct_equal);
-        state->identity = get_device_identity(bus_id, device_address);
-        state->interface_num = interface_num;
-        wmem_map_insert(device_states, key, state);
+        state->identity = get_device_identity(urb->bus_id, urb->device_address);
+        urb->conv->class_data = state;
     }
     return state;
 }
@@ -1930,16 +1929,14 @@ dissect_cmsis_dap_heur(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
           usb_info->interfaceProtocol != CMSIS_DAP_USB_PROTOCOL))) {
         return false;
     }
-    uint8_t interface_num = usb_info->interfaceNum;
     device_state_t *state = first_pass ?
-        get_device_state(urb->bus_id, urb->device_address, interface_num) :
-        lookup_device_state(urb->bus_id, urb->device_address, interface_num);
+        get_conv_state(urb) : lookup_conv_state(urb);
     if (state == NULL) {
         return false;
     }
     interface_identity_t *interface = (interface_identity_t *)
         wmem_map_lookup(state->identity->interfaces,
-        GUINT_TO_POINTER((unsigned)interface_num + 1));
+        GUINT_TO_POINTER((unsigned)usb_info->interfaceNum + 1));
     bool has_interface_descriptor = interface != NULL && interface->descriptor_seen;
     if (has_interface_descriptor &&
         (interface->interface_class != CMSIS_DAP_USB_CLASS ||
@@ -2018,13 +2015,10 @@ dissect_cmsis_dap(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *dat
         return 0;
     }
     const bool first_pass = !PINFO_FD_VISITED(pinfo);
-    uint32_t device_address = urb->device_address;
-    uint16_t bus_id = urb->bus_id;
     uint32_t endpoint = urb->endpoint;
     bool is_request = urb_is_request(urb);
     device_state_t *state = first_pass ?
-        get_device_state(bus_id, device_address, urb->conv->interfaceNum) :
-        lookup_device_state(bus_id, device_address, urb->conv->interfaceNum);
+        get_conv_state(urb) : lookup_conv_state(urb);
     if (state == NULL) {
         return 0;
     }
@@ -2171,8 +2165,6 @@ proto_register_cmsis_dap(void)
     proto_register_subtree_array(ett, array_length(ett));
     expert_module_t *expert_module = expert_register_protocol(proto_cmsis_dap);
     expert_register_field_array(expert_module, ei, array_length(ei));
-    device_states = wmem_map_new_autoreset(wmem_epan_scope(), wmem_file_scope(),
-        g_direct_hash, g_direct_equal);
     usb_device_identities = wmem_map_new_autoreset(wmem_epan_scope(),
         wmem_file_scope(), g_direct_hash, g_direct_equal);
 }

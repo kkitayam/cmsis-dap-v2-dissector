@@ -533,24 +533,6 @@ get_usb_device_address_for_identity(packet_info *pinfo, uint16_t *bus_id)
     return 0;
 }
 
-static GPtrArray *
-usb_field_values(proto_tree *tree, int hfindex)
-{
-    if (tree == NULL || hfindex < 0) {
-        return NULL;
-    }
-    GPtrArray *found = proto_find_finfo(tree, hfindex);
-    if (found == NULL) {
-        return NULL;
-    }
-    GPtrArray *fields = g_ptr_array_sized_new(found->len);
-    for (unsigned i = 0; i < found->len; i++) {
-        g_ptr_array_add(fields, g_ptr_array_index(found, i));
-    }
-    g_ptr_array_free(found, true);
-    return fields;
-}
-
 static unsigned
 usb_field_count(GPtrArray *fields)
 {
@@ -606,9 +588,9 @@ dissect_usb_identity(tvbuff_t *tvb _U_, packet_info *pinfo, proto_tree *tree,
     }
     uint16_t bus_id;
     uint32_t device_address = get_usb_device_address_for_identity(pinfo, &bus_id);
-    GPtrArray *descriptor_types = usb_field_values(tree, hf_usb_descriptor_type);
-    GPtrArray *request_frames = usb_field_values(tree, hf_usb_request_in);
-    GPtrArray *strings = usb_field_values(tree, hf_usb_string);
+    GPtrArray *descriptor_types = proto_find_finfo(tree, hf_usb_descriptor_type);
+    GPtrArray *request_frames = proto_find_finfo(tree, hf_usb_request_in);
+    GPtrArray *strings = proto_find_finfo(tree, hf_usb_string);
     /* Identity requires the first-pass tree from the parent USB dissector. */
     if (device_address == 0 || (usb_field_count(descriptor_types) == 0 &&
             usb_field_count(request_frames) == 0 && usb_field_count(strings) == 0)) {
@@ -619,7 +601,7 @@ dissect_usb_identity(tvbuff_t *tvb _U_, packet_info *pinfo, proto_tree *tree,
     }
     usb_device_identity_t *identity = get_device_identity(bus_id, device_address);
 
-    GPtrArray *descriptor_indexes = usb_field_values(tree, hf_usb_descriptor_index);
+    GPtrArray *descriptor_indexes = proto_find_finfo(tree, hf_usb_descriptor_index);
     for (unsigned i = 0; i < MIN(usb_field_count(descriptor_indexes),
             usb_field_count(descriptor_types)); i++) {
         if (usb_field_uint(descriptor_types, i) == USB_DESCRIPTOR_STRING &&
@@ -630,13 +612,13 @@ dissect_usb_identity(tvbuff_t *tvb _U_, packet_info *pinfo, proto_tree *tree,
         }
     }
 
-    GPtrArray *product_indexes = usb_field_values(tree, hf_usb_product_string);
+    GPtrArray *product_indexes = proto_find_finfo(tree, hf_usb_product_string);
     if (usb_field_count(product_indexes) > 0) {
         identity->product_string_index = (uint8_t)usb_field_uint(product_indexes, 0);
     }
 
-    GPtrArray *interface_numbers = usb_field_values(tree, hf_usb_interface_number);
-    GPtrArray *interface_strings = usb_field_values(tree, hf_usb_interface_string);
+    GPtrArray *interface_numbers = proto_find_finfo(tree, hf_usb_interface_number);
+    GPtrArray *interface_strings = proto_find_finfo(tree, hf_usb_interface_string);
     unsigned interface_count = MIN(usb_field_count(interface_numbers),
         usb_field_count(interface_strings));
     for (unsigned i = 0; i < interface_count; i++) {
@@ -2073,8 +2055,6 @@ void
 proto_reg_handoff_cmsis_dap(void)
 {
     GArray *wanted_hfids;
-    int usb_hfids[7];
-    unsigned i;
 
     hf_usb_descriptor_index = proto_registrar_get_id_byname("usb.DescriptorIndex");
     hf_usb_descriptor_type = proto_registrar_get_id_byname("usb.bDescriptorType");
@@ -2083,26 +2063,22 @@ proto_reg_handoff_cmsis_dap(void)
     hf_usb_product_string = proto_registrar_get_id_byname("usb.iProduct");
     hf_usb_interface_number = proto_registrar_get_id_byname("usb.bInterfaceNumber");
     hf_usb_interface_string = proto_registrar_get_id_byname("usb.iInterface");
-    usb_hfids[0] = hf_usb_descriptor_index;
-    usb_hfids[1] = hf_usb_descriptor_type;
-    usb_hfids[2] = hf_usb_request_in;
-    usb_hfids[3] = hf_usb_string;
-    usb_hfids[4] = hf_usb_product_string;
-    usb_hfids[5] = hf_usb_interface_number;
-    usb_hfids[6] = hf_usb_interface_string;
+    int usb_hfids[] = {
+        hf_usb_descriptor_index,
+        hf_usb_descriptor_type,
+        hf_usb_request_in,
+        hf_usb_string,
+        hf_usb_product_string,
+        hf_usb_interface_number,
+        hf_usb_interface_string
+    };
 
     heur_dissector_add("usb.bulk", dissect_cmsis_dap_heur, "CMSIS-DAP v2 USB bulk",
         "cmsis_dap_usb_bulk", proto_cmsis_dap, HEURISTIC_ENABLE);
     usb_identity_handle = create_dissector_handle(dissect_usb_identity,
         proto_cmsis_dap_usb_identity);
-    wanted_hfids = g_array_new(false, false, sizeof(int));
-    for (i = 0; i < G_N_ELEMENTS(usb_hfids); i++) {
-        if (usb_hfids[i] >= 0) {
-            g_array_append_val(wanted_hfids, usb_hfids[i]);
-        } else {
-            g_warning("USB field needed for CMSIS-DAP identification was not registered");
-        }
-    }
+    wanted_hfids = g_array_sized_new(false, false, sizeof(int), G_N_ELEMENTS(usb_hfids));
+    g_array_append_vals(wanted_hfids, usb_hfids, G_N_ELEMENTS(usb_hfids));
     register_postdissector(usb_identity_handle);
     set_postdissector_wanted_hfids(usb_identity_handle, wanted_hfids);
 }

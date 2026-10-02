@@ -15,7 +15,6 @@
 #define CMSIS_DAP_USB_CLASS 0xff
 #define CMSIS_DAP_USB_SUBCLASS 0x00
 #define CMSIS_DAP_USB_PROTOCOL 0x00
-#define USB_TRANSFER_TYPE_BULK 0x02
 #define USB_UNKNOWN_INTERFACE_VALUE 0xffff
 #define USB_DESCRIPTOR_STRING 0x03
 
@@ -240,12 +239,7 @@ static int hf_usb_request_in;
 static int hf_usb_string;
 static int hf_usb_product_string;
 static int hf_usb_interface_number;
-static int hf_usb_interface_class;
-static int hf_usb_interface_subclass;
-static int hf_usb_interface_protocol;
 static int hf_usb_interface_string;
-static int hf_usb_endpoint_address;
-static int hf_usb_endpoint_transfer;
 
 static dissector_handle_t usb_identity_handle;
 
@@ -253,24 +247,11 @@ static int dissect_cmsis_dap(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree
     void *data);
 
 typedef struct {
-    bool descriptor_seen;
-    uint8_t interface_class;
-    uint8_t interface_subclass;
-    uint8_t interface_protocol;
-    uint8_t string_index;
-    bool string_seen;
-    bool string_matches;
-    bool have_bulk_out;
-    bool have_bulk_in;
-} interface_identity_t;
-
-typedef struct {
-    wmem_map_t *interfaces;
     wmem_map_t *string_requests;
-    bool have_product_string_index;
+    uint8_t interface_string_indices[256];
+    bool string_seen[256];
+    bool string_matches[256];
     uint8_t product_string_index;
-    bool product_string_seen;
-    bool product_string_matches;
 } usb_device_identity_t;
 
 typedef struct {
@@ -278,11 +259,6 @@ typedef struct {
     bool has_match;
     bool has_timestamp;
 } transfer_operation_t;
-
-typedef struct {
-    uint8_t bit_count;
-    bool is_input;
-} swd_sequence_t;
 
 typedef struct {
     bool accepted;
@@ -293,10 +269,8 @@ typedef struct {
     uint32_t response_frame;
     uint8_t command;
     uint8_t info_id;
-    transfer_operation_t *transfers;
-    unsigned transfer_count;
-    swd_sequence_t *swd_sequences;
-    unsigned swd_sequence_count;
+    GArray *transfers;
+    GArray *swd_sequences;
 } request_record_t;
 
 typedef struct {
@@ -317,7 +291,6 @@ typedef struct {
     wmem_map_t *requests;
     wmem_map_t *frames;
     usb_device_identity_t *identity;
-    uint8_t interface_num;
     uint32_t request_count;
     uint32_t response_cursor[256];
     bool have_out_endpoint;
@@ -332,8 +305,23 @@ typedef struct {
     uint32_t trace_tail_frame;
 } device_state_t;
 
-static wmem_map_t *device_states;
 static wmem_map_t *usb_device_identities;
+
+static bool
+free_file_scope_garray(wmem_allocator_t *allocator _U_, wmem_cb_event_t event _U_,
+    void *user_data)
+{
+    g_array_unref((GArray *)user_data);
+    return false;
+}
+
+static GArray *
+new_file_scope_garray(guint element_size, guint reserved_size)
+{
+    GArray *array = g_array_sized_new(false, false, element_size, reserved_size);
+    wmem_register_callback(wmem_file_scope(), free_file_scope_garray, array);
+    return array;
+}
 
 #define HF_UINT8(hf, label, abbrev, display, vals, mask) \
     { &(hf), { label, abbrev, FT_UINT8, display, vals, mask, NULL, HFILL } }
@@ -488,8 +476,6 @@ get_device_identity(uint16_t bus_id, uint32_t device_address)
 
     if (identity == NULL) {
         identity = wmem_new0(wmem_file_scope(), usb_device_identity_t);
-        identity->interfaces = wmem_map_new(wmem_file_scope(), g_direct_hash,
-            g_direct_equal);
         identity->string_requests = wmem_map_new(wmem_file_scope(), g_direct_hash,
             g_direct_equal);
         wmem_map_insert(usb_device_identities, key, identity);
@@ -497,46 +483,33 @@ get_device_identity(uint16_t bus_id, uint32_t device_address)
     return identity;
 }
 
-static interface_identity_t *
-get_interface_identity(usb_device_identity_t *identity, uint8_t interface_num)
+static device_state_t *
+lookup_conv_state(urb_info_t *urb)
 {
-    void *key = GUINT_TO_POINTER((unsigned)interface_num + 1);
-    interface_identity_t *interface = (interface_identity_t *)
-        wmem_map_lookup(identity->interfaces, key);
-
-    if (interface == NULL) {
-        interface = wmem_new0(wmem_file_scope(), interface_identity_t);
-        wmem_map_insert(identity->interfaces, key, interface);
+    if (urb == NULL || urb->conv == NULL) {
+        return NULL;
     }
-    return interface;
+    return (device_state_t *)urb->conv->class_data;
 }
 
 static device_state_t *
-lookup_device_state(uint16_t bus_id, uint32_t device_address, uint8_t interface_num)
+get_conv_state(urb_info_t *urb)
 {
-    uint32_t key_value = ((uint32_t)bus_id << 15) |
-        ((device_address & 0x7f) << 8) | interface_num;
-    void *key = GUINT_TO_POINTER(key_value + 1);
-    return (device_state_t *)wmem_map_lookup(device_states, key);
-}
-
-static device_state_t *
-get_device_state(uint16_t bus_id, uint32_t device_address, uint8_t interface_num)
-{
-    /* USB endpoint conversations are separate; share command state by interface. */
-    device_state_t *state = lookup_device_state(bus_id, device_address, interface_num);
-
+    if (urb == NULL || urb->conv == NULL) {
+        return NULL;
+    }
+    device_state_t *state = lookup_conv_state(urb);
     if (state == NULL) {
-        uint32_t key_value = ((uint32_t)bus_id << 15) |
-            ((device_address & 0x7f) << 8) | interface_num;
-        void *key = GUINT_TO_POINTER(key_value + 1);
-
+        /*
+         * Enumeration makes the USB conversation shared by an interface's
+         * endpoints. Keep state across SET_CONFIGURATION; later passes need
+         * the first-pass records.
+         */
         state = wmem_new0(wmem_file_scope(), device_state_t);
         state->requests = wmem_map_new(wmem_file_scope(), g_direct_hash, g_direct_equal);
         state->frames = wmem_map_new(wmem_file_scope(), g_direct_hash, g_direct_equal);
-        state->identity = get_device_identity(bus_id, device_address);
-        state->interface_num = interface_num;
-        wmem_map_insert(device_states, key, state);
+        state->identity = get_device_identity(urb->bus_id, urb->device_address);
+        urb->conv->class_data = state;
     }
     return state;
 }
@@ -659,62 +632,17 @@ dissect_usb_identity(tvbuff_t *tvb _U_, packet_info *pinfo, proto_tree *tree,
 
     GPtrArray *product_indexes = usb_field_values(tree, hf_usb_product_string);
     if (usb_field_count(product_indexes) > 0) {
-        identity->have_product_string_index = true;
         identity->product_string_index = (uint8_t)usb_field_uint(product_indexes, 0);
     }
 
     GPtrArray *interface_numbers = usb_field_values(tree, hf_usb_interface_number);
-    GPtrArray *interface_classes = usb_field_values(tree, hf_usb_interface_class);
-    GPtrArray *interface_subclasses = usb_field_values(tree, hf_usb_interface_subclass);
-    GPtrArray *interface_protocols = usb_field_values(tree, hf_usb_interface_protocol);
     GPtrArray *interface_strings = usb_field_values(tree, hf_usb_interface_string);
     unsigned interface_count = MIN(usb_field_count(interface_numbers),
         usb_field_count(interface_strings));
     for (unsigned i = 0; i < interface_count; i++) {
         uint8_t interface_num = (uint8_t)usb_field_uint(interface_numbers, i);
-        interface_identity_t *interface = get_interface_identity(identity, interface_num);
-
-        interface->descriptor_seen = true;
-        if (i < usb_field_count(interface_classes)) {
-            interface->interface_class = (uint8_t)usb_field_uint(interface_classes, i);
-        }
-        if (i < usb_field_count(interface_subclasses)) {
-            interface->interface_subclass = (uint8_t)usb_field_uint(interface_subclasses, i);
-        }
-        if (i < usb_field_count(interface_protocols)) {
-            interface->interface_protocol = (uint8_t)usb_field_uint(interface_protocols, i);
-        }
-        interface->string_index = (uint8_t)usb_field_uint(interface_strings, i);
-    }
-
-    GPtrArray *endpoint_addresses = usb_field_values(tree, hf_usb_endpoint_address);
-    GPtrArray *endpoint_transfers = usb_field_values(tree, hf_usb_endpoint_transfer);
-    interface_count = usb_field_count(interface_numbers);
-    if (interface_count > 0) {
-        unsigned current_interface = 0;
-        for (unsigned i = 0; i < MIN(usb_field_count(endpoint_addresses),
-                usb_field_count(endpoint_transfers)); i++) {
-            field_info *endpoint_field = usb_field_at(endpoint_addresses, i);
-            interface_identity_t *interface;
-            uint32_t endpoint;
-
-            while (current_interface + 1 < interface_count &&
-                usb_field_at(interface_numbers, current_interface + 1)->start <
-                    endpoint_field->start) {
-                current_interface++;
-            }
-            if (usb_field_uint(endpoint_transfers, i) != USB_TRANSFER_TYPE_BULK) {
-                continue;
-            }
-            interface = get_interface_identity(identity,
-                (uint8_t)usb_field_uint(interface_numbers, current_interface));
-            endpoint = usb_field_uint(endpoint_addresses, i);
-            if ((endpoint & 0x80) != 0) {
-                interface->have_bulk_in = true;
-            } else {
-                interface->have_bulk_out = true;
-            }
-        }
+        identity->interface_string_indices[interface_num] =
+            (uint8_t)usb_field_uint(interface_strings, i);
     }
 
     if (usb_field_count(request_frames) > 0 && usb_field_count(strings) > 0) {
@@ -726,21 +654,8 @@ dissect_usb_identity(tvbuff_t *tvb _U_, packet_info *pinfo, proto_tree *tree,
         if (index_value != NULL && string_field != NULL) {
             uint8_t string_index = (uint8_t)(GPOINTER_TO_UINT(index_value) - 1);
             const char *value = fvalue_get_string(string_field->value);
-            bool matches = string_contains_cmsis_dap(value);
-
-            if (identity->have_product_string_index &&
-                identity->product_string_index == string_index) {
-                identity->product_string_seen = true;
-                identity->product_string_matches = matches;
-            }
-            for (unsigned i = 0; i < 256; i++) {
-                interface_identity_t *interface = (interface_identity_t *)
-                    wmem_map_lookup(identity->interfaces, GUINT_TO_POINTER(i + 1));
-                if (interface != NULL && interface->string_index == string_index) {
-                    interface->string_seen = true;
-                    interface->string_matches = matches;
-                }
-            }
+            identity->string_seen[string_index] = true;
+            identity->string_matches[string_index] = string_contains_cmsis_dap(value);
         }
     }
     usb_field_values_free(descriptor_indexes);
@@ -749,12 +664,7 @@ dissect_usb_identity(tvbuff_t *tvb _U_, packet_info *pinfo, proto_tree *tree,
     usb_field_values_free(strings);
     usb_field_values_free(product_indexes);
     usb_field_values_free(interface_numbers);
-    usb_field_values_free(interface_classes);
-    usb_field_values_free(interface_subclasses);
-    usb_field_values_free(interface_protocols);
     usb_field_values_free(interface_strings);
-    usb_field_values_free(endpoint_addresses);
-    usb_field_values_free(endpoint_transfers);
     return 0;
 }
 
@@ -1148,8 +1058,7 @@ dissect_transfer(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, unsigned p
         GString *accesses = g_string_new("");
         if (request != NULL && !PINFO_FD_VISITED(pinfo)) {
             request->transfers = count > 0 ?
-                wmem_alloc0(wmem_file_scope(), sizeof(*request->transfers) * count) : NULL;
-            request->transfer_count = 0;
+                new_file_scope_garray(sizeof(transfer_operation_t), count) : NULL;
         }
         if (tree != NULL) {
             proto_tree_add_item(tree, hf_dap_index, tvb, payload_offset, 1, ENC_NA);
@@ -1199,10 +1108,12 @@ dissect_transfer(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, unsigned p
                 offset += 4;
             }
             if (request != NULL && !PINFO_FD_VISITED(pinfo)) {
-                request->transfers[i].is_read = !is_write;
-                request->transfers[i].has_match = has_match;
-                request->transfers[i].has_timestamp = has_timestamp;
-                request->transfer_count = i + 1;
+                transfer_operation_t transfer = {
+                    .is_read = !is_write,
+                    .has_match = has_match,
+                    .has_timestamp = has_timestamp
+                };
+                g_array_append_val(request->transfers, transfer);
             }
         }
         if (parsed_transfers > 1) {
@@ -1229,8 +1140,9 @@ dissect_transfer(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, unsigned p
         }
         unsigned offset = payload_offset + 2;
         for (unsigned i = 0; i < count && request != NULL &&
-                i < request->transfer_count; i++) {
-            const transfer_operation_t *transfer = &request->transfers[i];
+                request->transfers != NULL && i < request->transfers->len; i++) {
+            const transfer_operation_t *transfer =
+                &g_array_index(request->transfers, transfer_operation_t, i);
             if (transfer->is_read) {
                 if (transfer->has_timestamp && !transfer->has_match) {
                     if (length - offset < 1) {
@@ -1285,6 +1197,13 @@ add_swj_pin_bits(proto_tree *tree, tvbuff_t *tvb, unsigned offset)
     proto_tree_add_item(tree, hf_swj_nreset, tvb, offset, 1, ENC_NA);
 }
 
+static unsigned
+swd_sequence_bit_count(uint8_t sequence_info)
+{
+    unsigned bit_count = sequence_info & 0x3f;
+    return bit_count == 0 ? 64 : bit_count;
+}
+
 static void
 dissect_swd_sequence(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
     unsigned payload_offset, bool is_request, request_record_t *request, char *summary,
@@ -1305,9 +1224,7 @@ dissect_swd_sequence(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
         unsigned offset = payload_offset + 1;
         if (request != NULL && !PINFO_FD_VISITED(pinfo)) {
             request->swd_sequences = sequence_count > 0 ?
-                wmem_alloc0(wmem_file_scope(),
-                    sizeof(*request->swd_sequences) * sequence_count) : NULL;
-            request->swd_sequence_count = 0;
+                new_file_scope_garray(sizeof(uint8_t), sequence_count) : NULL;
         }
         for (unsigned i = 0; i < sequence_count; i++) {
             if (offset >= length) {
@@ -1316,12 +1233,9 @@ dissect_swd_sequence(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
             }
             uint8_t sequence_info = tvb_get_uint8(tvb, offset);
             bool is_input = (sequence_info & 0x80) != 0;
-            unsigned bit_count = sequence_info & 0x3f;
+            unsigned bit_count = swd_sequence_bit_count(sequence_info);
             unsigned data_length;
 
-            if (bit_count == 0) {
-                bit_count = 64;
-            }
             data_length = (bit_count + 7) / 8;
             if (tree != NULL) {
                 proto_tree_add_item(tree, hf_swd_sequence_info, tvb, offset, 1, ENC_NA);
@@ -1339,9 +1253,7 @@ dissect_swd_sequence(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
                 offset += data_length;
             }
             if (request != NULL && !PINFO_FD_VISITED(pinfo)) {
-                request->swd_sequences[i].bit_count = (uint8_t)bit_count;
-                request->swd_sequences[i].is_input = is_input;
-                request->swd_sequence_count = i + 1;
+                g_array_append_val(request->swd_sequences, sequence_info);
             }
         }
         g_snprintf(summary, summary_length, "%u sequence(s)", sequence_count);
@@ -1354,13 +1266,13 @@ dissect_swd_sequence(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
     }
     add_response_status(tvb, tree, payload_offset, payload_length, summary, summary_length);
     unsigned offset = payload_offset + 1;
-    if (request != NULL) {
-        for (unsigned i = 0; i < request->swd_sequence_count; i++) {
-            const swd_sequence_t *sequence = &request->swd_sequences[i];
-            if (!sequence->is_input) {
+    if (request != NULL && request->swd_sequences != NULL) {
+        for (unsigned i = 0; i < request->swd_sequences->len; i++) {
+            uint8_t sequence_info = g_array_index(request->swd_sequences, uint8_t, i);
+            if ((sequence_info & 0x80) == 0) {
                 continue;
             }
-            unsigned data_length = (sequence->bit_count + 7) / 8;
+            unsigned data_length = (swd_sequence_bit_count(sequence_info) + 7) / 8;
             if (length - offset < data_length) {
                 add_malformed(tree, pinfo, tvb, "SWD sequence input data is truncated");
                 break;
@@ -1876,21 +1788,23 @@ urb_is_request(const urb_info_t *urb)
 
 static int
 interface_string_match(const usb_device_identity_t *identity,
-    const interface_identity_t *interface)
+    uint8_t interface_num)
 {
     bool has_mismatching_string = false;
+    uint8_t interface_string_index = identity->interface_string_indices[interface_num];
 
-    if (identity->have_product_string_index && identity->product_string_index != 0) {
-        if (identity->product_string_seen && identity->product_string_matches) {
+    if (identity->product_string_index != 0 &&
+        identity->string_seen[identity->product_string_index]) {
+        if (identity->string_matches[identity->product_string_index]) {
             return 1;
         }
-        has_mismatching_string |= identity->product_string_seen;
+        has_mismatching_string = true;
     }
-    if (interface != NULL && interface->descriptor_seen && interface->string_index != 0) {
-        if (interface->string_seen && interface->string_matches) {
+    if (interface_string_index != 0 && identity->string_seen[interface_string_index]) {
+        if (identity->string_matches[interface_string_index]) {
             return 1;
         }
-        has_mismatching_string |= interface->string_seen;
+        has_mismatching_string = true;
     }
     if (has_mismatching_string) {
         return -1;
@@ -1930,29 +1844,12 @@ dissect_cmsis_dap_heur(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
           usb_info->interfaceProtocol != CMSIS_DAP_USB_PROTOCOL))) {
         return false;
     }
-    uint8_t interface_num = usb_info->interfaceNum;
     device_state_t *state = first_pass ?
-        get_device_state(urb->bus_id, urb->device_address, interface_num) :
-        lookup_device_state(urb->bus_id, urb->device_address, interface_num);
+        get_conv_state(urb) : lookup_conv_state(urb);
     if (state == NULL) {
         return false;
     }
-    interface_identity_t *interface = (interface_identity_t *)
-        wmem_map_lookup(state->identity->interfaces,
-        GUINT_TO_POINTER((unsigned)interface_num + 1));
-    bool has_interface_descriptor = interface != NULL && interface->descriptor_seen;
-    if (has_interface_descriptor &&
-        (interface->interface_class != CMSIS_DAP_USB_CLASS ||
-         interface->interface_subclass != CMSIS_DAP_USB_SUBCLASS ||
-         interface->interface_protocol != CMSIS_DAP_USB_PROTOCOL)) {
-        return false;
-    }
-    if (has_interface_descriptor &&
-        (!interface->have_bulk_out || !interface->have_bulk_in)) {
-        return false;
-    }
-
-    int string_match = interface_string_match(state->identity, interface);
+    int string_match = interface_string_match(state->identity, usb_info->interfaceNum);
     if (string_match < 0) {
         return false;
     }
@@ -2018,13 +1915,10 @@ dissect_cmsis_dap(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *dat
         return 0;
     }
     const bool first_pass = !PINFO_FD_VISITED(pinfo);
-    uint32_t device_address = urb->device_address;
-    uint16_t bus_id = urb->bus_id;
     uint32_t endpoint = urb->endpoint;
     bool is_request = urb_is_request(urb);
     device_state_t *state = first_pass ?
-        get_device_state(bus_id, device_address, urb->conv->interfaceNum) :
-        lookup_device_state(bus_id, device_address, urb->conv->interfaceNum);
+        get_conv_state(urb) : lookup_conv_state(urb);
     if (state == NULL) {
         return 0;
     }
@@ -2171,8 +2065,6 @@ proto_register_cmsis_dap(void)
     proto_register_subtree_array(ett, array_length(ett));
     expert_module_t *expert_module = expert_register_protocol(proto_cmsis_dap);
     expert_register_field_array(expert_module, ei, array_length(ei));
-    device_states = wmem_map_new_autoreset(wmem_epan_scope(), wmem_file_scope(),
-        g_direct_hash, g_direct_equal);
     usb_device_identities = wmem_map_new_autoreset(wmem_epan_scope(),
         wmem_file_scope(), g_direct_hash, g_direct_equal);
 }
@@ -2181,7 +2073,7 @@ void
 proto_reg_handoff_cmsis_dap(void)
 {
     GArray *wanted_hfids;
-    int usb_hfids[12];
+    int usb_hfids[7];
     unsigned i;
 
     hf_usb_descriptor_index = proto_registrar_get_id_byname("usb.DescriptorIndex");
@@ -2190,24 +2082,14 @@ proto_reg_handoff_cmsis_dap(void)
     hf_usb_string = proto_registrar_get_id_byname("usb.bString");
     hf_usb_product_string = proto_registrar_get_id_byname("usb.iProduct");
     hf_usb_interface_number = proto_registrar_get_id_byname("usb.bInterfaceNumber");
-    hf_usb_interface_class = proto_registrar_get_id_byname("usb.bInterfaceClass");
-    hf_usb_interface_subclass = proto_registrar_get_id_byname("usb.bInterfaceSubClass");
-    hf_usb_interface_protocol = proto_registrar_get_id_byname("usb.bInterfaceProtocol");
     hf_usb_interface_string = proto_registrar_get_id_byname("usb.iInterface");
-    hf_usb_endpoint_address = proto_registrar_get_id_byname("usb.bEndpointAddress");
-    hf_usb_endpoint_transfer = proto_registrar_get_id_byname("usb.bmAttributes.transfer");
     usb_hfids[0] = hf_usb_descriptor_index;
     usb_hfids[1] = hf_usb_descriptor_type;
     usb_hfids[2] = hf_usb_request_in;
     usb_hfids[3] = hf_usb_string;
     usb_hfids[4] = hf_usb_product_string;
     usb_hfids[5] = hf_usb_interface_number;
-    usb_hfids[6] = hf_usb_interface_class;
-    usb_hfids[7] = hf_usb_interface_subclass;
-    usb_hfids[8] = hf_usb_interface_protocol;
-    usb_hfids[9] = hf_usb_interface_string;
-    usb_hfids[10] = hf_usb_endpoint_address;
-    usb_hfids[11] = hf_usb_endpoint_transfer;
+    usb_hfids[6] = hf_usb_interface_string;
 
     heur_dissector_add("usb.bulk", dissect_cmsis_dap_heur, "CMSIS-DAP v2 USB bulk",
         "cmsis_dap_usb_bulk", proto_cmsis_dap, HEURISTIC_ENABLE);

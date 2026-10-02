@@ -274,10 +274,8 @@ typedef struct {
     uint32_t response_frame;
     uint8_t command;
     uint8_t info_id;
-    transfer_operation_t *transfers;
-    unsigned transfer_count;
-    swd_sequence_t *swd_sequences;
-    unsigned swd_sequence_count;
+    GArray *transfers;
+    GArray *swd_sequences;
 } request_record_t;
 
 typedef struct {
@@ -313,6 +311,22 @@ typedef struct {
 } device_state_t;
 
 static wmem_map_t *usb_device_identities;
+
+static bool
+free_file_scope_garray(wmem_allocator_t *allocator _U_, wmem_cb_event_t event _U_,
+    void *user_data)
+{
+    g_array_unref((GArray *)user_data);
+    return false;
+}
+
+static GArray *
+new_file_scope_garray(guint element_size, guint reserved_size)
+{
+    GArray *array = g_array_sized_new(false, false, element_size, reserved_size);
+    wmem_register_callback(wmem_file_scope(), free_file_scope_garray, array);
+    return array;
+}
 
 #define HF_UINT8(hf, label, abbrev, display, vals, mask) \
     { &(hf), { label, abbrev, FT_UINT8, display, vals, mask, NULL, HFILL } }
@@ -1049,8 +1063,7 @@ dissect_transfer(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, unsigned p
         GString *accesses = g_string_new("");
         if (request != NULL && !PINFO_FD_VISITED(pinfo)) {
             request->transfers = count > 0 ?
-                wmem_alloc0(wmem_file_scope(), sizeof(*request->transfers) * count) : NULL;
-            request->transfer_count = 0;
+                new_file_scope_garray(sizeof(transfer_operation_t), count) : NULL;
         }
         if (tree != NULL) {
             proto_tree_add_item(tree, hf_dap_index, tvb, payload_offset, 1, ENC_NA);
@@ -1100,10 +1113,12 @@ dissect_transfer(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, unsigned p
                 offset += 4;
             }
             if (request != NULL && !PINFO_FD_VISITED(pinfo)) {
-                request->transfers[i].is_read = !is_write;
-                request->transfers[i].has_match = has_match;
-                request->transfers[i].has_timestamp = has_timestamp;
-                request->transfer_count = i + 1;
+                transfer_operation_t transfer = {
+                    .is_read = !is_write,
+                    .has_match = has_match,
+                    .has_timestamp = has_timestamp
+                };
+                g_array_append_val(request->transfers, transfer);
             }
         }
         if (parsed_transfers > 1) {
@@ -1130,8 +1145,9 @@ dissect_transfer(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, unsigned p
         }
         unsigned offset = payload_offset + 2;
         for (unsigned i = 0; i < count && request != NULL &&
-                i < request->transfer_count; i++) {
-            const transfer_operation_t *transfer = &request->transfers[i];
+                request->transfers != NULL && i < request->transfers->len; i++) {
+            const transfer_operation_t *transfer =
+                &g_array_index(request->transfers, transfer_operation_t, i);
             if (transfer->is_read) {
                 if (transfer->has_timestamp && !transfer->has_match) {
                     if (length - offset < 1) {
@@ -1206,9 +1222,7 @@ dissect_swd_sequence(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
         unsigned offset = payload_offset + 1;
         if (request != NULL && !PINFO_FD_VISITED(pinfo)) {
             request->swd_sequences = sequence_count > 0 ?
-                wmem_alloc0(wmem_file_scope(),
-                    sizeof(*request->swd_sequences) * sequence_count) : NULL;
-            request->swd_sequence_count = 0;
+                new_file_scope_garray(sizeof(swd_sequence_t), sequence_count) : NULL;
         }
         for (unsigned i = 0; i < sequence_count; i++) {
             if (offset >= length) {
@@ -1240,9 +1254,11 @@ dissect_swd_sequence(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
                 offset += data_length;
             }
             if (request != NULL && !PINFO_FD_VISITED(pinfo)) {
-                request->swd_sequences[i].bit_count = (uint8_t)bit_count;
-                request->swd_sequences[i].is_input = is_input;
-                request->swd_sequence_count = i + 1;
+                swd_sequence_t sequence = {
+                    .bit_count = (uint8_t)bit_count,
+                    .is_input = is_input
+                };
+                g_array_append_val(request->swd_sequences, sequence);
             }
         }
         g_snprintf(summary, summary_length, "%u sequence(s)", sequence_count);
@@ -1255,9 +1271,10 @@ dissect_swd_sequence(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
     }
     add_response_status(tvb, tree, payload_offset, payload_length, summary, summary_length);
     unsigned offset = payload_offset + 1;
-    if (request != NULL) {
-        for (unsigned i = 0; i < request->swd_sequence_count; i++) {
-            const swd_sequence_t *sequence = &request->swd_sequences[i];
+    if (request != NULL && request->swd_sequences != NULL) {
+        for (unsigned i = 0; i < request->swd_sequences->len; i++) {
+            const swd_sequence_t *sequence =
+                &g_array_index(request->swd_sequences, swd_sequence_t, i);
             if (!sequence->is_input) {
                 continue;
             }

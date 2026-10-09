@@ -566,7 +566,7 @@ get_conv_state(urb_info_t *urb)
 static void
 apply_candidate_to_state(device_state_t *state, interface_candidate_t *candidate)
 {
-    if (candidate == NULL || state->applied_candidate == candidate) {
+    if (candidate == NULL) {
         return;
     }
     state->is_cmsis_dap = true;
@@ -2201,6 +2201,7 @@ static heuristic_trust_level_t
 get_heuristic_trust_level(const device_state_t *state,
     const interface_candidate_t *candidate)
 {
+    /* A successful payload probe is per-packet only; enumeration grants trust. */
     return (candidate != NULL && candidate->confirmed) || state->is_cmsis_dap ?
         HEURISTIC_TRUST_CONFIRMED : HEURISTIC_PROBE_BY_COMMAND;
 }
@@ -2225,6 +2226,7 @@ dissect_cmsis_dap_heur(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
         return false;
     }
     if (decision != NULL && decision->accepted) {
+        /* This frame was already dissected before its accepted decision was saved. */
         return true;
     }
 
@@ -2250,11 +2252,13 @@ dissect_cmsis_dap_heur(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
             return false;
         }
     } else {
-        apply_candidate_to_state(state, candidate);
-        state->is_cmsis_dap = true;
+        if (candidate != NULL && candidate->confirmed &&
+            state->applied_candidate != candidate) {
+            apply_candidate_to_state(state, candidate);
+        }
         uint32_t endpoint = urb->endpoint;
         if (is_request) {
-            if (state->have_out_endpoint && endpoint != state->out_endpoint) {
+            if (!state->have_out_endpoint || endpoint != state->out_endpoint) {
                 return false;
             }
         } else {

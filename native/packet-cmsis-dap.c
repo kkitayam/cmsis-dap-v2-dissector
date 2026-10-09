@@ -333,6 +333,7 @@ typedef struct {
     bool have_trace_endpoint;
     uint8_t trace_endpoint;
     bool is_cmsis_dap;
+    interface_candidate_t *applied_candidate;
     uint8_t trace_tail[16];
     unsigned trace_tail_length;
     uint32_t trace_tail_frame;
@@ -560,6 +561,22 @@ get_conv_state(urb_info_t *urb)
         urb->conv->class_data = state;
     }
     return state;
+}
+
+static void
+apply_candidate_to_state(device_state_t *state, interface_candidate_t *candidate)
+{
+    if (candidate == NULL || state->applied_candidate == candidate) {
+        return;
+    }
+    state->is_cmsis_dap = true;
+    state->have_out_endpoint = true;
+    state->out_endpoint = candidate->out_endpoint;
+    state->have_in_endpoint = true;
+    state->in_endpoint = candidate->in_endpoint;
+    state->have_trace_endpoint = candidate->have_trace_endpoint;
+    state->trace_endpoint = candidate->trace_endpoint;
+    state->applied_candidate = candidate;
 }
 
 static uint32_t
@@ -2164,6 +2181,30 @@ urb_is_request(const urb_info_t *urb)
     return (urb->endpoint & 0x80) == 0;
 }
 
+typedef enum {
+    HEURISTIC_PROBE_BY_COMMAND,
+    HEURISTIC_TRUST_CONFIRMED
+} heuristic_trust_level_t;
+
+static bool
+usb_class_compatible_with_cmsis_dap(const usb_conv_info_t *usb_info)
+{
+    return usb_info->interfaceClass == USB_UNKNOWN_INTERFACE_VALUE ||
+        (usb_info->interfaceClass == CMSIS_DAP_USB_CLASS &&
+         (usb_info->interfaceSubclass == USB_UNKNOWN_INTERFACE_VALUE ||
+          usb_info->interfaceSubclass == CMSIS_DAP_USB_SUBCLASS) &&
+         (usb_info->interfaceProtocol == USB_UNKNOWN_INTERFACE_VALUE ||
+          usb_info->interfaceProtocol == CMSIS_DAP_USB_PROTOCOL));
+}
+
+static heuristic_trust_level_t
+get_heuristic_trust_level(const device_state_t *state,
+    const interface_candidate_t *candidate)
+{
+    return (candidate != NULL && candidate->confirmed) || state->is_cmsis_dap ?
+        HEURISTIC_TRUST_CONFIRMED : HEURISTIC_PROBE_BY_COMMAND;
+}
+
 static bool
 dissect_cmsis_dap_heur(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
     void *data)
@@ -2177,71 +2218,57 @@ dissect_cmsis_dap_heur(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
     heuristic_decision_t *decision = (heuristic_decision_t *)
         p_get_proto_data(wmem_file_scope(), pinfo, proto_cmsis_dap, 0);
     if (!first_pass) {
-        return decision != NULL && decision->accepted &&
-            dissect_cmsis_dap(tvb, pinfo, tree, urb) > 0;
+        if (decision != NULL && decision->accepted) {
+            dissect_cmsis_dap(tvb, pinfo, tree, urb);
+            return true;
+        }
+        return false;
     }
     if (decision != NULL && decision->accepted) {
         return true;
     }
 
     usb_conv_info_t *usb_info = urb->conv;
-    if (tvb_captured_length(tvb) == 0) {
+    if (tvb_captured_length(tvb) == 0 ||
+        !usb_class_compatible_with_cmsis_dap(usb_info)) {
         return false;
     }
-    if (usb_info->interfaceClass != USB_UNKNOWN_INTERFACE_VALUE &&
-        (usb_info->interfaceClass != CMSIS_DAP_USB_CLASS ||
-         (usb_info->interfaceSubclass != USB_UNKNOWN_INTERFACE_VALUE &&
-          usb_info->interfaceSubclass != CMSIS_DAP_USB_SUBCLASS) ||
-         (usb_info->interfaceProtocol != USB_UNKNOWN_INTERFACE_VALUE &&
-          usb_info->interfaceProtocol != CMSIS_DAP_USB_PROTOCOL))) {
+
+    device_state_t *state = get_conv_state(urb);
+    if (state == NULL) {
         return false;
     }
     bool is_request = urb_is_request(urb);
-    device_state_t *state = lookup_conv_state(urb);
     device_track_t *track = lookup_device_track(urb->bus_id, urb->device_address);
     interface_candidate_t *candidate = track != NULL ?
         lookup_interface_candidate(track, usb_info->interfaceNum) : NULL;
-    bool is_confirmed = (candidate != NULL && candidate->confirmed) ||
-        (state != NULL && state->is_cmsis_dap);
+    heuristic_trust_level_t trust = get_heuristic_trust_level(state, candidate);
+    bool is_trace_endpoint = false;
 
-    if (!is_confirmed) {
-        if (!first_pass || !is_request || !is_cmsis_dap_command(tvb, true)) {
-             return false;
-        }
-        state = get_conv_state(urb);
-        if (state == NULL) {
-             return false;
+    if (trust == HEURISTIC_PROBE_BY_COMMAND) {
+        if (!is_request) {
+            return false;
         }
     } else {
-        state = first_pass ? get_conv_state(urb) : lookup_conv_state(urb);
-        if (state == NULL) {
-             return false;
-        }
+        apply_candidate_to_state(state, candidate);
         state->is_cmsis_dap = true;
-        if (candidate != NULL) {
-             state->have_out_endpoint = true;
-             state->out_endpoint = candidate->out_endpoint;
-             state->have_in_endpoint = true;
-             state->in_endpoint = candidate->in_endpoint;
-             state->have_trace_endpoint = candidate->have_trace_endpoint;
-             state->trace_endpoint = candidate->trace_endpoint;
-        }
         uint32_t endpoint = urb->endpoint;
-        bool is_trace_endpoint = !is_request && state->have_trace_endpoint &&
-             endpoint == state->trace_endpoint;
         if (is_request) {
-             if (state->have_out_endpoint && endpoint != state->out_endpoint) {
-                 return false;
-             }
-             if (!is_cmsis_dap_command(tvb, true)) {
-                 return false;
-             }
-        } else if (is_trace_endpoint) {
-             /* The second bulk IN endpoint carries raw SWO data. */
-        } else if (!state->have_in_endpoint || endpoint != state->in_endpoint ||
-             !is_cmsis_dap_command(tvb, false)) {
-             return false;
+            if (state->have_out_endpoint && endpoint != state->out_endpoint) {
+                return false;
+            }
+        } else {
+            is_trace_endpoint = state->have_trace_endpoint &&
+                endpoint == state->trace_endpoint;
+            if (!is_trace_endpoint &&
+                (!state->have_in_endpoint || endpoint != state->in_endpoint)) {
+                return false;
+            }
         }
+    }
+
+    if (!is_trace_endpoint && !is_cmsis_dap_command(tvb, is_request)) {
+        return false;
     }
     int dissected_length = dissect_cmsis_dap(tvb, pinfo, tree, urb);
     if (dissected_length == 0) {

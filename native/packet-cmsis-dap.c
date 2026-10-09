@@ -661,6 +661,55 @@ usb_field_uint(GPtrArray *fields, unsigned index)
     return field != NULL ? fvalue_get_uinteger(field->value) : 0;
 }
 
+static int
+usb_first_field_uint(proto_tree *tree, int hfindex)
+{
+    GPtrArray *fields = proto_find_finfo(tree, hfindex);
+    int value = -1;
+
+    if (usb_field_count(fields) > 0) {
+        g_ptr_array_sort(fields, compare_field_info_start);
+        uint32_t first_value = usb_field_uint(fields, 0);
+        if (first_value <= INT_MAX) {
+            value = (int)first_value;
+        }
+    }
+    usb_field_values_free(fields);
+    return value;
+}
+
+static bool
+usb_try_first_field_uint32(proto_tree *tree, int hfindex, uint32_t *value)
+{
+    GPtrArray *fields = proto_find_finfo(tree, hfindex);
+    bool found = usb_field_count(fields) > 0;
+
+    if (found) {
+        g_ptr_array_sort(fields, compare_field_info_start);
+        *value = usb_field_uint(fields, 0);
+    }
+    usb_field_values_free(fields);
+    return found;
+}
+
+/* The returned string remains valid for the current packet's proto-tree lifetime. */
+static const char *
+usb_first_field_string(proto_tree *tree, int hfindex)
+{
+    GPtrArray *fields = proto_find_finfo(tree, hfindex);
+    const char *value = NULL;
+
+    if (usb_field_count(fields) > 0) {
+        g_ptr_array_sort(fields, compare_field_info_start);
+        field_info *field = usb_field_at(fields, 0);
+        if (field != NULL) {
+            value = fvalue_get_string(field->value);
+        }
+    }
+    usb_field_values_free(fields);
+    return value;
+}
+
 static uint32_t
 usb_field_uint_at_start(GPtrArray *fields, tvbuff_t *tvb, unsigned start,
     uint32_t default_value)
@@ -702,14 +751,10 @@ string_contains_cmsis_dap(const char *value)
 }
 
 static void
-record_string_request(device_track_t *track, packet_info *pinfo,
-    GPtrArray *descriptor_indexes)
+record_string_request(device_track_t *track, packet_info *pinfo, uint32_t string_index)
 {
-    if (usb_field_count(descriptor_indexes) > 0) {
-        uint32_t string_index = usb_field_uint(descriptor_indexes, 0);
-        wmem_map_insert(track->string_requests, GUINT_TO_POINTER(pinfo->num + 1),
-            GUINT_TO_POINTER(string_index + 1));
-    }
+    wmem_map_insert(track->string_requests, GUINT_TO_POINTER(pinfo->num + 1),
+        GUINT_TO_POINTER(string_index + 1));
 }
 
 static bool
@@ -936,7 +981,7 @@ string_descriptor_is_complete(const field_info *descriptor_type)
 
 static void
 process_string_response(device_track_t *track, uint32_t request_frame,
-    const field_info *descriptor_type, field_info *string_field,
+    const field_info *descriptor_type, const char *string_value,
     uint16_t bus_id, uint32_t device_address)
 {
     if (!string_descriptor_is_complete(descriptor_type)) {
@@ -945,12 +990,12 @@ process_string_response(device_track_t *track, uint32_t request_frame,
 
     void *index_value = wmem_map_lookup(track->string_requests,
         GUINT_TO_POINTER(request_frame + 1));
-    if (index_value == NULL || string_field == NULL) {
+    if (index_value == NULL || string_value == NULL) {
         return;
     }
     uint8_t string_index = (uint8_t)(GPOINTER_TO_UINT(index_value) - 1);
     wmem_map_remove(track->string_requests, GUINT_TO_POINTER(request_frame + 1));
-    bool matches = string_contains_cmsis_dap(fvalue_get_string(string_field->value));
+    bool matches = string_contains_cmsis_dap(string_value);
     unsigned candidate_count = wmem_map_size(track->candidates);
     bool removed_candidate = false;
     for (unsigned i = 0; i < 256; i++) {
@@ -992,33 +1037,29 @@ dissect_usb_identity(tvbuff_t *tvb _U_, packet_info *pinfo, proto_tree *tree,
 
     switch (descriptor_type) {
     case USB_DESCRIPTOR_DEVICE: {
-        GPtrArray *product_indexes = proto_find_finfo(tree, hf_usb_product_string);
-        if (usb_field_count(product_indexes) > 0) {
+        int product_index = usb_first_field_uint(tree, hf_usb_product_string);
+        if (product_index >= 0) {
             track = get_device_track(bus_id, device_address);
-            track->i_product = (uint8_t)usb_field_uint(product_indexes, 0);
+            track->i_product = (uint8_t)product_index;
         }
-        usb_field_values_free(product_indexes);
         break;
     }
     case USB_DESCRIPTOR_STRING: {
-        GPtrArray *descriptor_indexes = proto_find_finfo(tree, hf_usb_descriptor_index);
-        if (usb_field_count(descriptor_indexes) > 0) {
+        int descriptor_index = usb_first_field_uint(tree, hf_usb_descriptor_index);
+        if (descriptor_index >= 0) {
             if (track == NULL) {
                 track = get_device_track(bus_id, device_address);
             }
-            record_string_request(track, pinfo, descriptor_indexes);
+            record_string_request(track, pinfo, (uint32_t)descriptor_index);
         } else if (track != NULL) {
-            GPtrArray *request_frames = proto_find_finfo(tree, hf_usb_request_in);
-            if (usb_field_count(request_frames) > 0) {
-                GPtrArray *strings = proto_find_finfo(tree, hf_usb_string);
-                process_string_response(track, usb_field_uint(request_frames, 0),
-                    usb_field_at(descriptor_types, 0), usb_field_at(strings, 0),
+            uint32_t request_frame;
+            if (usb_try_first_field_uint32(tree, hf_usb_request_in, &request_frame)) {
+                const char *string_value = usb_first_field_string(tree, hf_usb_string);
+                process_string_response(track, request_frame,
+                    usb_field_at(descriptor_types, 0), string_value,
                     bus_id, device_address);
-                usb_field_values_free(strings);
             }
-            usb_field_values_free(request_frames);
         }
-        usb_field_values_free(descriptor_indexes);
         break;
     }
     case USB_DESCRIPTOR_CONFIGURATION: {

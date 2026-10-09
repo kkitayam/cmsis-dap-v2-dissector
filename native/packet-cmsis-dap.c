@@ -241,9 +241,18 @@ static expert_field ei_packet_lost = EI_INIT;
 static int proto_cmsis_dap_usb_identity;
 static int hf_usb_descriptor_index;
 static int hf_usb_descriptor_type;
+static int hf_usb_descriptor_length;
+static int hf_usb_configuration_total_length;
 static int hf_usb_request_in;
 static int hf_usb_string;
 static int hf_usb_product_string;
+static int hf_usb_interface_number;
+static int hf_usb_interface_class;
+static int hf_usb_interface_subclass;
+static int hf_usb_interface_protocol;
+static int hf_usb_interface_string;
+static int hf_usb_endpoint_address;
+static int hf_usb_endpoint_transfer;
 
 static dissector_handle_t usb_identity_handle;
 
@@ -578,6 +587,40 @@ usb_field_count(GPtrArray *fields)
     return fields != NULL ? fields->len : 0;
 }
 
+static gint
+compare_field_info_start(gconstpointer left_pointer, gconstpointer right_pointer)
+{
+    const field_info *left = *(field_info * const *)left_pointer;
+    const field_info *right = *(field_info * const *)right_pointer;
+
+    return (left->start > right->start) - (left->start < right->start);
+}
+
+static GPtrArray *
+proto_find_finfo_with_same_name(proto_tree *tree, int hfindex)
+{
+    GPtrArray *fields = g_ptr_array_new();
+    for (header_field_info *hfinfo = proto_registrar_get_nth(hfindex);
+            hfinfo != NULL; hfinfo = hfinfo->same_name_next) {
+        GPtrArray *matches = proto_find_finfo(tree, hfinfo->id);
+        for (unsigned i = 0; i < usb_field_count(matches); i++) {
+            g_ptr_array_add(fields, g_ptr_array_index(matches, i));
+        }
+        g_ptr_array_free(matches, true);
+    }
+    g_ptr_array_sort(fields, compare_field_info_start);
+    return fields;
+}
+
+static void
+append_field_hfids(GArray *hfids, int hfindex)
+{
+    for (header_field_info *hfinfo = proto_registrar_get_nth(hfindex);
+            hfinfo != NULL; hfinfo = hfinfo->same_name_next) {
+        g_array_append_val(hfids, hfinfo->id);
+    }
+}
+
 static field_info *
 usb_field_at(GPtrArray *fields, unsigned index)
 {
@@ -649,10 +692,23 @@ record_string_request(device_track_t *track, packet_info *pinfo, proto_tree *tre
 }
 
 static bool
-update_configuration_candidates(device_track_t *track, tvbuff_t *tvb, proto_tree *tree)
+update_configuration_candidates(device_track_t *track, proto_tree *tree)
 {
     GPtrArray *descriptor_types = proto_find_finfo(tree, hf_usb_descriptor_type);
+    GPtrArray *descriptor_lengths = proto_find_finfo(tree, hf_usb_descriptor_length);
+    GPtrArray *total_lengths = proto_find_finfo(tree, hf_usb_configuration_total_length);
+    GPtrArray *interface_numbers = proto_find_finfo(tree, hf_usb_interface_number);
+    GPtrArray *interface_classes = proto_find_finfo(tree, hf_usb_interface_class);
+    GPtrArray *interface_subclasses =
+        proto_find_finfo_with_same_name(tree, hf_usb_interface_subclass);
+    GPtrArray *interface_protocols =
+        proto_find_finfo_with_same_name(tree, hf_usb_interface_protocol);
+    GPtrArray *interface_strings = proto_find_finfo(tree, hf_usb_interface_string);
+    GPtrArray *endpoint_addresses = proto_find_finfo(tree, hf_usb_endpoint_address);
+    GPtrArray *endpoint_transfers = proto_find_finfo(tree, hf_usb_endpoint_transfer);
     unsigned configuration_start = UINT_MAX;
+    field_info *configuration_type = NULL;
+    unsigned total_length = 0;
     bool configuration_complete = false;
 
     for (unsigned i = 0; i < usb_field_count(descriptor_types); i++) {
@@ -661,75 +717,115 @@ update_configuration_candidates(device_track_t *track, tvbuff_t *tvb, proto_tree
             type_field == NULL || type_field->start == 0) {
             continue;
         }
-        configuration_start = type_field->start - 1;
+        for (unsigned j = 0; j < usb_field_count(descriptor_lengths); j++) {
+            field_info *length_field = usb_field_at(descriptor_lengths, j);
+            if (length_field != NULL && length_field->ds_tvb == type_field->ds_tvb &&
+                length_field->start + 1 == type_field->start) {
+                configuration_start = length_field->start;
+                break;
+            }
+        }
+        for (unsigned j = 0; j < usb_field_count(total_lengths); j++) {
+            field_info *total_field = usb_field_at(total_lengths, j);
+            if (total_field != NULL && total_field->ds_tvb == type_field->ds_tvb &&
+                total_field->start == type_field->start + 1) {
+                configuration_type = type_field;
+                total_length = usb_field_uint(total_lengths, j);
+                break;
+            }
+        }
         break;
     }
 
-    if (configuration_start == UINT_MAX ||
-        tvb_captured_length_remaining(tvb, (int)configuration_start) < 9) {
+    if (configuration_type == NULL || configuration_start == UINT_MAX ||
+        configuration_start > INT_MAX) {
         goto cleanup;
     }
-    unsigned configuration_length = tvb_get_uint8(tvb, configuration_start);
-    unsigned total_length = tvb_get_uint16(tvb, configuration_start + 2,
-        ENC_LITTLE_ENDIAN);
+    tvbuff_t *descriptor_tvb = configuration_type->ds_tvb;
+    if (descriptor_tvb == NULL ||
+        configuration_start > tvb_captured_length(descriptor_tvb)) {
+        goto cleanup;
+    }
+    unsigned configuration_length = 0;
+    for (unsigned i = 0; i < usb_field_count(descriptor_lengths); i++) {
+        field_info *length_field = usb_field_at(descriptor_lengths, i);
+        if (length_field != NULL && length_field->ds_tvb == configuration_type->ds_tvb &&
+            length_field->start == configuration_start) {
+            configuration_length = usb_field_uint(descriptor_lengths, i);
+            break;
+        }
+    }
     if (configuration_length < 9 || total_length < configuration_length ||
-        (unsigned)tvb_captured_length_remaining(tvb, (int)configuration_start) !=
-            total_length) {
+        (unsigned)tvb_captured_length_remaining(descriptor_tvb,
+            (int)configuration_start) != total_length) {
         goto cleanup;
     }
 
     configuration_complete = true;
     track->candidates = wmem_map_new(wmem_file_scope(), g_direct_hash, g_direct_equal);
     track->string_requests = wmem_map_new(wmem_file_scope(), g_direct_hash, g_direct_equal);
-    unsigned descriptor_end = configuration_start + total_length;
     GArray *interfaces = g_array_new(false, true, sizeof(configuration_interface_t));
-    configuration_interface_t *current_interface = NULL;
-    bool descriptor_stream_valid = true;
-    unsigned offset = configuration_start;
-    for (; offset + 2 <= descriptor_end;) {
-        unsigned descriptor_length = tvb_get_uint8(tvb, offset);
-        uint8_t descriptor_type = tvb_get_uint8(tvb, offset + 1);
-        if (descriptor_length < 2 || offset + descriptor_length > descriptor_end) {
-            descriptor_stream_valid = false;
-            break;
-        }
-        if (descriptor_type == USB_DESCRIPTOR_INTERFACE && descriptor_length >= 9) {
-            configuration_interface_t interface = {
-                .interface_num = tvb_get_uint8(tvb, offset + 2),
-                .is_cmsis_dap =
-                    tvb_get_uint8(tvb, offset + 5) == CMSIS_DAP_USB_CLASS &&
-                    tvb_get_uint8(tvb, offset + 6) == CMSIS_DAP_USB_SUBCLASS &&
-                    tvb_get_uint8(tvb, offset + 7) == CMSIS_DAP_USB_PROTOCOL,
-                .i_interface = tvb_get_uint8(tvb, offset + 8)
-            };
-            g_array_append_val(interfaces, interface);
-            current_interface = &g_array_index(interfaces, configuration_interface_t,
-                interfaces->len - 1);
-        } else if (descriptor_type == USB_DESCRIPTOR_ENDPOINT && descriptor_length >= 7 &&
-            current_interface != NULL &&
-            (tvb_get_uint8(tvb, offset + 3) & 0x03) == USB_TRANSFER_TYPE_BULK) {
-            uint8_t endpoint = tvb_get_uint8(tvb, offset + 2);
-            if ((endpoint & 0x80) != 0) {
-                /* The first bulk IN is the response endpoint; the second carries SWO. */
-                if (!current_interface->have_bulk_in) {
-                    current_interface->in_endpoint = endpoint;
-                } else if (!current_interface->have_trace_endpoint) {
-                    current_interface->trace_endpoint = endpoint;
-                    current_interface->have_trace_endpoint = true;
-                }
-                current_interface->have_bulk_in = true;
-            } else {
-                if (!current_interface->have_bulk_out) {
-                    current_interface->out_endpoint = endpoint;
-                }
-                current_interface->have_bulk_out = true;
-            }
-        }
-        offset += descriptor_length;
-    }
-    if (!descriptor_stream_valid || offset != descriptor_end) {
+    unsigned interface_count = MIN(usb_field_count(interface_numbers),
+        MIN(usb_field_count(interface_classes),
+            MIN(usb_field_count(interface_subclasses),
+                MIN(usb_field_count(interface_protocols), usb_field_count(interface_strings)))));
+    if (usb_field_count(interface_numbers) != interface_count ||
+        usb_field_count(interface_classes) != interface_count ||
+        usb_field_count(interface_subclasses) != interface_count ||
+        usb_field_count(interface_protocols) != interface_count ||
+        usb_field_count(interface_strings) != interface_count ||
+        usb_field_count(endpoint_addresses) != usb_field_count(endpoint_transfers)) {
         g_array_free(interfaces, true);
         goto cleanup;
+    }
+    for (unsigned i = 0; i < interface_count; i++) {
+        configuration_interface_t interface = {
+            .interface_num = (uint8_t)usb_field_uint(interface_numbers, i),
+            .i_interface = (uint8_t)usb_field_uint(interface_strings, i),
+            .is_cmsis_dap =
+                usb_field_uint(interface_classes, i) == CMSIS_DAP_USB_CLASS &&
+                usb_field_uint(interface_subclasses, i) == CMSIS_DAP_USB_SUBCLASS &&
+                usb_field_uint(interface_protocols, i) == CMSIS_DAP_USB_PROTOCOL
+        };
+        g_array_append_val(interfaces, interface);
+    }
+
+    unsigned current_interface = 0;
+    for (unsigned i = 0; i < usb_field_count(endpoint_addresses) && interfaces->len > 0; i++) {
+        field_info *endpoint_field = usb_field_at(endpoint_addresses, i);
+        while (current_interface + 1 < interfaces->len) {
+            field_info *next_interface_field = usb_field_at(interface_numbers,
+                current_interface + 1);
+            if (next_interface_field == NULL || endpoint_field == NULL ||
+                next_interface_field->start >= endpoint_field->start) {
+                break;
+            }
+            current_interface++;
+        }
+        if (endpoint_field == NULL) {
+            continue;
+        }
+        configuration_interface_t *interface =
+            &g_array_index(interfaces, configuration_interface_t, current_interface);
+        uint32_t endpoint = usb_field_uint(endpoint_addresses, i);
+        if (usb_field_uint(endpoint_transfers, i) != USB_TRANSFER_TYPE_BULK) {
+            continue;
+        }
+        if ((endpoint & 0x80) != 0) {
+            /* The first bulk IN is the response endpoint; the second carries SWO. */
+            if (!interface->have_bulk_in) {
+                interface->in_endpoint = (uint8_t)endpoint;
+            } else if (!interface->have_trace_endpoint) {
+                interface->trace_endpoint = (uint8_t)endpoint;
+                interface->have_trace_endpoint = true;
+            }
+            interface->have_bulk_in = true;
+        } else {
+            if (!interface->have_bulk_out) {
+                interface->out_endpoint = (uint8_t)endpoint;
+            }
+            interface->have_bulk_out = true;
+        }
     }
 
     for (unsigned i = 0; i < interfaces->len; i++) {
@@ -760,14 +856,22 @@ update_configuration_candidates(device_track_t *track, tvbuff_t *tvb, proto_tree
 
 cleanup:
     usb_field_values_free(descriptor_types);
+    usb_field_values_free(descriptor_lengths);
+    usb_field_values_free(total_lengths);
+    usb_field_values_free(interface_numbers);
+    usb_field_values_free(interface_classes);
+    usb_field_values_free(interface_subclasses);
+    usb_field_values_free(interface_protocols);
+    usb_field_values_free(interface_strings);
+    usb_field_values_free(endpoint_addresses);
+    usb_field_values_free(endpoint_transfers);
     return configuration_complete;
 }
 
 static bool
-string_descriptor_is_complete(tvbuff_t *tvb, GPtrArray *descriptor_types,
+string_descriptor_is_complete(GPtrArray *descriptor_types, GPtrArray *descriptor_lengths,
     GPtrArray *strings)
 {
-    unsigned captured_length = tvb_captured_length(tvb);
     if (usb_field_count(strings) == 0) {
         return false;
     }
@@ -778,23 +882,29 @@ string_descriptor_is_complete(tvbuff_t *tvb, GPtrArray *descriptor_types,
             continue;
         }
         unsigned descriptor_start = type_field->start - 1;
-        if (descriptor_start >= captured_length) {
-            continue;
+        for (unsigned j = 0; j < usb_field_count(descriptor_lengths); j++) {
+            field_info *length_field = usb_field_at(descriptor_lengths, j);
+            if (length_field == NULL || length_field->ds_tvb != type_field->ds_tvb ||
+                length_field->start != descriptor_start || length_field->ds_tvb == NULL ||
+                descriptor_start > tvb_captured_length(length_field->ds_tvb)) {
+                continue;
+            }
+            unsigned descriptor_length = usb_field_uint(descriptor_lengths, j);
+            return descriptor_length >= 2 &&
+                (unsigned)tvb_captured_length_remaining(length_field->ds_tvb,
+                    (int)descriptor_start) == descriptor_length;
         }
-        unsigned descriptor_length = tvb_get_uint8(tvb, descriptor_start);
-        return descriptor_length >= 2 &&
-            captured_length - descriptor_start == descriptor_length;
     }
     return false;
 }
 
 static void
-process_string_response(device_track_t *track, tvbuff_t *tvb,
-    GPtrArray *request_frames, GPtrArray *strings,
+process_string_response(device_track_t *track, GPtrArray *request_frames, GPtrArray *strings,
+    GPtrArray *descriptor_lengths,
     GPtrArray *descriptor_types, uint16_t bus_id, uint32_t device_address)
 {
     if (usb_field_count(request_frames) == 0 ||
-        !string_descriptor_is_complete(tvb, descriptor_types, strings)) {
+        !string_descriptor_is_complete(descriptor_types, descriptor_lengths, strings)) {
         return;
     }
 
@@ -838,11 +948,13 @@ dissect_usb_identity(tvbuff_t *tvb _U_, packet_info *pinfo, proto_tree *tree,
     uint16_t bus_id;
     uint32_t device_address = get_usb_device_address_for_identity(pinfo, &bus_id);
     GPtrArray *descriptor_types = proto_find_finfo(tree, hf_usb_descriptor_type);
+    GPtrArray *descriptor_lengths = proto_find_finfo(tree, hf_usb_descriptor_length);
     GPtrArray *request_frames = proto_find_finfo(tree, hf_usb_request_in);
     GPtrArray *strings = proto_find_finfo(tree, hf_usb_string);
     if (device_address == 0 || (usb_field_count(descriptor_types) == 0 &&
             usb_field_count(request_frames) == 0 && usb_field_count(strings) == 0)) {
         usb_field_values_free(descriptor_types);
+        usb_field_values_free(descriptor_lengths);
         usb_field_values_free(request_frames);
         usb_field_values_free(strings);
         return 0;
@@ -863,7 +975,7 @@ dissect_usb_identity(tvbuff_t *tvb _U_, packet_info *pinfo, proto_tree *tree,
         }
         if (track != NULL) {
             record_string_request(track, pinfo, tree, descriptor_types);
-            process_string_response(track, tvb, request_frames, strings,
+            process_string_response(track, request_frames, strings, descriptor_lengths,
                 descriptor_types, bus_id, device_address);
         }
         usb_field_values_free(descriptor_indexes);
@@ -872,13 +984,13 @@ dissect_usb_identity(tvbuff_t *tvb _U_, packet_info *pinfo, proto_tree *tree,
         if (track == NULL) {
             track = get_device_track(bus_id, device_address);
         }
-        bool configuration_complete =
-            update_configuration_candidates(track, tvb, tree);
+        bool configuration_complete = update_configuration_candidates(track, tree);
         if (configuration_complete && wmem_map_size(track->candidates) == 0) {
             wmem_map_remove(device_tracks, device_track_key(bus_id, device_address));
         }
     }
     usb_field_values_free(descriptor_types);
+    usb_field_values_free(descriptor_lengths);
     usb_field_values_free(request_frames);
     usb_field_values_free(strings);
     return 0;
@@ -2250,15 +2362,31 @@ proto_reg_handoff_cmsis_dap(void)
 
     hf_usb_descriptor_index = proto_registrar_get_id_byname("usb.DescriptorIndex");
     hf_usb_descriptor_type = proto_registrar_get_id_byname("usb.bDescriptorType");
+    hf_usb_descriptor_length = proto_registrar_get_id_byname("usb.bLength");
+    hf_usb_configuration_total_length = proto_registrar_get_id_byname("usb.wTotalLength");
     hf_usb_request_in = proto_registrar_get_id_byname("usb.request_in");
     hf_usb_string = proto_registrar_get_id_byname("usb.bString");
     hf_usb_product_string = proto_registrar_get_id_byname("usb.iProduct");
+    hf_usb_interface_number = proto_registrar_get_id_byname("usb.bInterfaceNumber");
+    hf_usb_interface_class = proto_registrar_get_id_byname("usb.bInterfaceClass");
+    hf_usb_interface_subclass = proto_registrar_get_id_byname("usb.bInterfaceSubClass");
+    hf_usb_interface_protocol = proto_registrar_get_id_byname("usb.bInterfaceProtocol");
+    hf_usb_interface_string = proto_registrar_get_id_byname("usb.iInterface");
+    hf_usb_endpoint_address = proto_registrar_get_id_byname("usb.bEndpointAddress");
+    hf_usb_endpoint_transfer = proto_registrar_get_id_byname("usb.bmAttributes.transfer");
     int usb_hfids[] = {
         hf_usb_descriptor_index,
         hf_usb_descriptor_type,
+        hf_usb_descriptor_length,
+        hf_usb_configuration_total_length,
         hf_usb_request_in,
         hf_usb_string,
-        hf_usb_product_string
+        hf_usb_product_string,
+        hf_usb_interface_number,
+        hf_usb_interface_class,
+        hf_usb_interface_string,
+        hf_usb_endpoint_address,
+        hf_usb_endpoint_transfer
     };
 
     heur_dissector_add("usb.bulk", dissect_cmsis_dap_heur, "CMSIS-DAP v2 USB bulk",
@@ -2267,6 +2395,8 @@ proto_reg_handoff_cmsis_dap(void)
         proto_cmsis_dap_usb_identity);
     wanted_hfids = g_array_sized_new(false, false, sizeof(int), G_N_ELEMENTS(usb_hfids));
     g_array_append_vals(wanted_hfids, usb_hfids, G_N_ELEMENTS(usb_hfids));
+    append_field_hfids(wanted_hfids, hf_usb_interface_subclass);
+    append_field_hfids(wanted_hfids, hf_usb_interface_protocol);
     register_postdissector(usb_identity_handle);
     set_postdissector_wanted_hfids(usb_identity_handle, wanted_hfids);
 }

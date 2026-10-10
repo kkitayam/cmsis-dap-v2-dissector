@@ -817,14 +817,24 @@ remove_matching_interface_candidate(gpointer key _U_, gpointer value, gpointer u
 }
 
 static void
-process_string_response(device_track_t *track, uint32_t request_frame,
-    const char *string_value, uint16_t bus_id, uint32_t device_address)
+process_string_response(device_track_t *track, proto_tree *tree,
+    uint16_t bus_id, uint32_t device_address)
 {
+    uint32_t request_frame;
+    if (!usb_first_field_uint(tree, hf_usb_request_in, &request_frame, NULL)) {
+        return;
+    }
+
     void *index_value = wmem_map_lookup(track->string_requests,
         GUINT_TO_POINTER(request_frame + 1));
     if (!index_value) {
         return;
     }
+    const char *string_value = usb_first_field_string(tree, hf_usb_string);
+    if (!string_value) {
+        return;
+    }
+
     uint8_t string_index = (uint8_t)(GPOINTER_TO_UINT(index_value) - 1);
     wmem_map_remove(track->string_requests, GUINT_TO_POINTER(request_frame + 1));
     bool matches = string_contains_cmsis_dap(string_value);
@@ -877,14 +887,7 @@ dissect_usb_identity(tvbuff_t *tvb _U_, packet_info *pinfo, proto_tree *tree,
         } else if (track != NULL) {
             if (usb_single_descriptor_is_complete(descriptor_type_field,
                     USB_DESCRIPTOR_STRING, 2, NULL, NULL)) {
-                uint32_t request_frame;
-                if (usb_first_field_uint(tree, hf_usb_request_in, &request_frame, NULL)) {
-                    const char *string_value = usb_first_field_string(tree, hf_usb_string);
-                    if (string_value) {
-                        process_string_response(track, request_frame, string_value,
-                            bus_id, device_address);
-                    }
-                }
+                process_string_response(track, tree, bus_id, device_address);
             }
         }
         break;

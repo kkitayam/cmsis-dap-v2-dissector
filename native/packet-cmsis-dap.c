@@ -617,14 +617,22 @@ usb_field_uint(GPtrArray *fields, unsigned index)
     return field != NULL ? fvalue_get_uinteger(field->value) : 0;
 }
 
+/* first_field, when requested, points into the proto tree and outlives the result array. */
 static int
-usb_first_field_uint(proto_tree *tree, int hfindex)
+usb_first_field_uint(proto_tree *tree, int hfindex, field_info **first_field)
 {
     GPtrArray *fields = proto_find_finfo(tree, hfindex);
     int value = -1;
 
+    if (first_field != NULL) {
+        *first_field = NULL;
+    }
     if (usb_field_count(fields) > 0) {
         g_ptr_array_sort(fields, compare_field_info_start);
+        field_info *field = usb_field_at(fields, 0);
+        if (first_field != NULL) {
+            *first_field = field;
+        }
         uint32_t first_value = usb_field_uint(fields, 0);
         if (first_value <= INT_MAX) {
             value = (int)first_value;
@@ -896,22 +904,20 @@ dissect_usb_identity(tvbuff_t *tvb _U_, packet_info *pinfo, proto_tree *tree,
     }
     uint16_t bus_id;
     uint32_t device_address = get_usb_device_address_for_identity(pinfo, &bus_id);
-    GPtrArray *descriptor_types = proto_find_finfo(tree, hf_usb_descriptor_type);
-    if (device_address == 0 || usb_field_count(descriptor_types) == 0) {
-        if (descriptor_types) g_ptr_array_free(descriptor_types, true);
+    field_info *descriptor_type_field;
+    int descriptor_type = usb_first_field_uint(tree, hf_usb_descriptor_type,
+        &descriptor_type_field);
+    if (device_address == 0 || descriptor_type < 0) {
         return 0;
     }
 
-    g_ptr_array_sort(descriptor_types, compare_field_info_start);
-    uint32_t descriptor_type = usb_field_uint(descriptor_types, 0);
     device_track_t *track = lookup_device_track(bus_id, device_address);
 
     switch (descriptor_type) {
     case USB_DESCRIPTOR_DEVICE: {
         tvbuff_t *descriptor_tvb;
         unsigned descriptor_start;
-        field_info *type_field = usb_field_at(descriptor_types, 0);
-        if (usb_single_descriptor_is_complete(type_field, USB_DESCRIPTOR_DEVICE, 18,
+        if (usb_single_descriptor_is_complete(descriptor_type_field, USB_DESCRIPTOR_DEVICE, 18,
                 &descriptor_tvb, &descriptor_start)) {
             track = get_device_track(bus_id, device_address);
             /* A complete device descriptor stores iProduct at byte offset 15. */
@@ -921,7 +927,7 @@ dissect_usb_identity(tvbuff_t *tvb _U_, packet_info *pinfo, proto_tree *tree,
         break;
     }
     case USB_DESCRIPTOR_STRING: {
-        int descriptor_index = usb_first_field_uint(tree, hf_usb_descriptor_index);
+        int descriptor_index = usb_first_field_uint(tree, hf_usb_descriptor_index, NULL);
         if (descriptor_index >= 0) {
             if (track == NULL) {
                 track = get_device_track(bus_id, device_address);
@@ -932,20 +938,20 @@ dissect_usb_identity(tvbuff_t *tvb _U_, packet_info *pinfo, proto_tree *tree,
             if (usb_try_first_field_uint32(tree, hf_usb_request_in, &request_frame)) {
                 const char *string_value = usb_first_field_string(tree, hf_usb_string);
                 process_string_response(track, request_frame,
-                    usb_field_at(descriptor_types, 0), string_value,
+                    descriptor_type_field, string_value,
                     bus_id, device_address);
             }
         }
         break;
     }
     case USB_DESCRIPTOR_CONFIGURATION: {
-        int descriptor_index = usb_first_field_uint(tree, hf_usb_descriptor_index);
+        int descriptor_index = usb_first_field_uint(tree, hf_usb_descriptor_index, NULL);
         if (descriptor_index < 0) {
             if (track == NULL) {
                 track = get_device_track(bus_id, device_address);
             }
             bool configuration_complete = update_configuration_candidates(track,
-                usb_field_at(descriptor_types, 0));
+                descriptor_type_field);
             if (configuration_complete && wmem_map_size(track->candidates) == 0) {
                 wmem_map_remove(device_tracks, device_track_key(bus_id, device_address));
             }
@@ -956,7 +962,6 @@ dissect_usb_identity(tvbuff_t *tvb _U_, packet_info *pinfo, proto_tree *tree,
         break;
     }
 
-    if (descriptor_types) g_ptr_array_free(descriptor_types, true);
     return 0;
 }
 

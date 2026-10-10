@@ -590,7 +590,7 @@ get_usb_device_address_for_identity(packet_info *pinfo, uint16_t *bus_id)
 static unsigned
 usb_field_count(GPtrArray *fields)
 {
-    return fields != NULL ? fields->len : 0;
+    return fields->len;
 }
 
 static gint
@@ -605,7 +605,7 @@ compare_field_info_start(gconstpointer left_pointer, gconstpointer right_pointer
 static field_info *
 usb_field_at(GPtrArray *fields, unsigned index)
 {
-    return fields != NULL && index < fields->len ?
+    return index < fields->len ?
         (field_info *)g_ptr_array_index(fields, index) : NULL;
 }
 
@@ -638,7 +638,7 @@ usb_first_field_uint(proto_tree *tree, int hfindex, field_info **first_field)
             value = (int)first_value;
         }
     }
-    if (fields) g_ptr_array_free(fields, true);
+    g_ptr_array_free(fields, true);
     return value;
 }
 
@@ -652,7 +652,7 @@ usb_try_first_field_uint32(proto_tree *tree, int hfindex, uint32_t *value)
         g_ptr_array_sort(fields, compare_field_info_start);
         *value = usb_field_uint(fields, 0);
     }
-    if (fields) g_ptr_array_free(fields, true);
+    g_ptr_array_free(fields, true);
     return found;
 }
 
@@ -670,7 +670,7 @@ usb_first_field_string(proto_tree *tree, int hfindex)
             value = fvalue_get_string(field->value);
         }
     }
-    if (fields) g_ptr_array_free(fields, true);
+    g_ptr_array_free(fields, true);
     return value;
 }
 

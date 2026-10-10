@@ -587,12 +587,6 @@ get_usb_device_address_for_identity(packet_info *pinfo, uint16_t *bus_id)
     return 0;
 }
 
-static unsigned
-usb_field_count(GPtrArray *fields)
-{
-    return fields->len;
-}
-
 static gint
 compare_field_info_start(gconstpointer left_pointer, gconstpointer right_pointer)
 {
@@ -600,21 +594,6 @@ compare_field_info_start(gconstpointer left_pointer, gconstpointer right_pointer
     const field_info *right = *(field_info * const *)right_pointer;
 
     return (left->start > right->start) - (left->start < right->start);
-}
-
-static field_info *
-usb_field_at(GPtrArray *fields, unsigned index)
-{
-    return index < fields->len ?
-        (field_info *)g_ptr_array_index(fields, index) : NULL;
-}
-
-static uint32_t
-usb_field_uint(GPtrArray *fields, unsigned index)
-{
-    field_info *field = usb_field_at(fields, index);
-
-    return field != NULL ? fvalue_get_uinteger(field->value) : 0;
 }
 
 /* first_field, when requested, points into the proto tree and outlives the result array. */
@@ -627,13 +606,13 @@ usb_first_field_uint(proto_tree *tree, int hfindex, field_info **first_field)
     if (first_field != NULL) {
         *first_field = NULL;
     }
-    if (usb_field_count(fields) > 0) {
+    if (fields->len > 0) {
         g_ptr_array_sort(fields, compare_field_info_start);
-        field_info *field = usb_field_at(fields, 0);
+        field_info *field = (field_info *)g_ptr_array_index(fields, 0);
         if (first_field != NULL) {
             *first_field = field;
         }
-        uint32_t first_value = usb_field_uint(fields, 0);
+        uint32_t first_value = fvalue_get_uinteger(field->value);
         if (first_value <= INT_MAX) {
             value = (int)first_value;
         }
@@ -646,11 +625,12 @@ static bool
 usb_try_first_field_uint32(proto_tree *tree, int hfindex, uint32_t *value)
 {
     GPtrArray *fields = proto_find_finfo(tree, hfindex);
-    bool found = usb_field_count(fields) > 0;
+    bool found = fields->len > 0;
 
     if (found) {
         g_ptr_array_sort(fields, compare_field_info_start);
-        *value = usb_field_uint(fields, 0);
+        field_info *field = (field_info *)g_ptr_array_index(fields, 0);
+        *value = fvalue_get_uinteger(field->value);
     }
     g_ptr_array_free(fields, true);
     return found;
@@ -663,12 +643,10 @@ usb_first_field_string(proto_tree *tree, int hfindex)
     GPtrArray *fields = proto_find_finfo(tree, hfindex);
     const char *value = NULL;
 
-    if (usb_field_count(fields) > 0) {
+    if (fields->len > 0) {
         g_ptr_array_sort(fields, compare_field_info_start);
-        field_info *field = usb_field_at(fields, 0);
-        if (field != NULL) {
-            value = fvalue_get_string(field->value);
-        }
+        field_info *field = (field_info *)g_ptr_array_index(fields, 0);
+        value = fvalue_get_string(field->value);
     }
     g_ptr_array_free(fields, true);
     return value;

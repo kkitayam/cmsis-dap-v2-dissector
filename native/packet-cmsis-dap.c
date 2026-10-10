@@ -525,18 +525,12 @@ lookup_interface_candidate(device_track_t *track, uint8_t interface_num)
 static device_state_t *
 lookup_conv_state(urb_info_t *urb)
 {
-    if (urb == NULL || urb->conv == NULL) {
-        return NULL;
-    }
     return (device_state_t *)urb->conv->class_data;
 }
 
 static device_state_t *
 get_conv_state(urb_info_t *urb)
 {
-    if (urb == NULL || urb->conv == NULL) {
-        return NULL;
-    }
     device_state_t *state = lookup_conv_state(urb);
     if (state == NULL) {
         /*
@@ -555,9 +549,6 @@ get_conv_state(urb_info_t *urb)
 static void
 apply_candidate_to_state(device_state_t *state, interface_candidate_t *candidate)
 {
-    if (candidate == NULL) {
-        return;
-    }
     state->is_cmsis_dap = true;
     state->have_out_endpoint = true;
     state->out_endpoint = candidate->out_endpoint;
@@ -637,9 +628,6 @@ usb_first_field_string(proto_tree *tree, int hfindex)
 static bool
 string_contains_cmsis_dap(const char *value)
 {
-    if (value == NULL) {
-        return false;
-    }
     char *normalized = g_ascii_strdown(value, -1);
     for (char *cursor = normalized; *cursor != '\0'; cursor++) {
         if (*cursor == '_') {
@@ -662,7 +650,7 @@ static bool
 usb_single_descriptor_is_complete(const field_info *type_field, uint8_t expected_type,
     unsigned minimum_length, tvbuff_t **tvb, unsigned *start)
 {
-    if (type_field == NULL || type_field->ds_tvb == NULL || type_field->start < 1) {
+    if (type_field->ds_tvb == NULL || type_field->start < 1) {
         return false;
     }
     unsigned descriptor_start = (unsigned)type_field->start - 1;
@@ -695,8 +683,7 @@ update_configuration_candidates(device_track_t *track, const field_info *configu
     GArray *interfaces;
     configuration_interface_t *current = NULL;
 
-    if (configuration_type == NULL || configuration_type->ds_tvb == NULL ||
-        configuration_type->start < 1) {
+    if (configuration_type->ds_tvb == NULL || configuration_type->start < 1) {
         return false;
     }
     descriptor_tvb = configuration_type->ds_tvb;
@@ -841,7 +828,7 @@ process_string_response(device_track_t *track, uint32_t request_frame,
 
     void *index_value = wmem_map_lookup(track->string_requests,
         GUINT_TO_POINTER(request_frame + 1));
-    if (index_value == NULL || string_value == NULL) {
+    if (!index_value) {
         return;
     }
     uint8_t string_index = (uint8_t)(GPOINTER_TO_UINT(index_value) - 1);
@@ -897,9 +884,11 @@ dissect_usb_identity(tvbuff_t *tvb _U_, packet_info *pinfo, proto_tree *tree,
             uint32_t request_frame;
             if (usb_first_field_uint(tree, hf_usb_request_in, &request_frame, NULL)) {
                 const char *string_value = usb_first_field_string(tree, hf_usb_string);
-                process_string_response(track, request_frame,
-                    descriptor_type_field, string_value,
-                    bus_id, device_address);
+                if (string_value) {
+                    process_string_response(track, request_frame,
+                        descriptor_type_field, string_value,
+                        bus_id, device_address);
+                }
             }
         }
         break;
@@ -928,7 +917,7 @@ dissect_usb_identity(tvbuff_t *tvb _U_, packet_info *pinfo, proto_tree *tree,
 static void
 add_generated_frame(proto_tree *tree, int hfindex, tvbuff_t *tvb, uint32_t frame)
 {
-    if (tree == NULL || frame == 0) {
+    if (frame == 0) {
         return;
     }
     proto_item *item = proto_tree_add_uint(tree, hfindex, tvb, 0, 0, frame);
@@ -938,7 +927,7 @@ add_generated_frame(proto_tree *tree, int hfindex, tvbuff_t *tvb, uint32_t frame
 static void
 add_info_string(proto_tree *tree, int hfindex, tvbuff_t *tvb, unsigned offset, unsigned length)
 {
-    if (tree == NULL || length == 0) {
+    if (length == 0) {
         return;
     }
     char *value = tvb_get_string_enc(wmem_packet_scope(), tvb, offset, length, ENC_UTF_8);
@@ -1280,7 +1269,9 @@ dissect_info(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, unsigned paylo
             g_snprintf(summary, summary_length, "%s",
                 val_to_str_const(info_id, info_names, "Info"));
         } else if (string_hf >= 0) {
-            add_info_string(tree, string_hf, tvb, payload_offset + 1, id_or_length);
+            if (tree) {
+                add_info_string(tree, string_hf, tvb, payload_offset + 1, id_or_length);
+            }
             g_snprintf(summary, summary_length, "%s %.*s",
                 val_to_str_const(info_id, info_names, "Info"), id_or_length,
                 tvb_get_string_enc(wmem_packet_scope(), tvb, payload_offset + 1,
@@ -2099,9 +2090,6 @@ dissect_cmsis_dap_heur(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
     }
 
     device_state_t *state = get_conv_state(urb);
-    if (state == NULL) {
-        return false;
-    }
     bool is_request = urb_is_request(urb);
     device_track_t *track = lookup_device_track(urb->bus_id, urb->device_address);
     interface_candidate_t *candidate = track != NULL ?
@@ -2114,7 +2102,7 @@ dissect_cmsis_dap_heur(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
             return false;
         }
     } else {
-        if (candidate != NULL && candidate->confirmed &&
+        if (candidate && candidate->confirmed &&
             state->applied_candidate != candidate) {
             apply_candidate_to_state(state, candidate);
         }

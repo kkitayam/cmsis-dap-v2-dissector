@@ -269,7 +269,6 @@ typedef struct {
 typedef struct {
     uint8_t interface_num;
     uint8_t i_interface;
-    bool is_cmsis_dap;
     bool have_bulk_in;
     bool have_bulk_out;
     uint8_t out_endpoint;
@@ -770,19 +769,20 @@ update_configuration_candidates(device_track_t *track, const field_info *configu
                 return false;
             }
             /* Standard interface descriptor: number at +2, class tuple at +5..+7. */
-            configuration_interface_t interface = {
-                .interface_num = tvb_get_uint8(descriptor_tvb, (int)offset + 2),
-                .i_interface = tvb_get_uint8(descriptor_tvb, (int)offset + 8),
-                .is_cmsis_dap =
-                    tvb_get_uint8(descriptor_tvb, (int)offset + 5) == CMSIS_DAP_USB_CLASS &&
-                    tvb_get_uint8(descriptor_tvb, (int)offset + 6) == CMSIS_DAP_USB_SUBCLASS &&
-                    tvb_get_uint8(descriptor_tvb, (int)offset + 7) == CMSIS_DAP_USB_PROTOCOL
-            };
-            g_array_append_val(interfaces, interface);
-            current = &g_array_index(interfaces, configuration_interface_t,
-                interfaces->len - 1);
-        } else if (descriptor_type == USB_DESCRIPTOR_ENDPOINT && current != NULL &&
-            current->is_cmsis_dap) {
+            if (tvb_get_uint8(descriptor_tvb, (int)offset + 5) == CMSIS_DAP_USB_CLASS &&
+                tvb_get_uint8(descriptor_tvb, (int)offset + 6) == CMSIS_DAP_USB_SUBCLASS &&
+                tvb_get_uint8(descriptor_tvb, (int)offset + 7) == CMSIS_DAP_USB_PROTOCOL) {
+                configuration_interface_t interface = {
+                    .interface_num = tvb_get_uint8(descriptor_tvb, (int)offset + 2),
+                    .i_interface = tvb_get_uint8(descriptor_tvb, (int)offset + 8)
+                };
+                g_array_append_val(interfaces, interface);
+                current = &g_array_index(interfaces, configuration_interface_t,
+                    interfaces->len - 1);
+            } else {
+                current = NULL;
+            }
+        } else if (descriptor_type == USB_DESCRIPTOR_ENDPOINT && current != NULL) {
             if (descriptor_length < 7) {
                 g_array_free(interfaces, true);
                 return false;
@@ -817,8 +817,7 @@ update_configuration_candidates(device_track_t *track, const field_info *configu
     for (unsigned i = 0; i < interfaces->len; i++) {
         configuration_interface_t *interface =
             &g_array_index(interfaces, configuration_interface_t, i);
-        if (!interface->is_cmsis_dap || !interface->have_bulk_in ||
-            !interface->have_bulk_out) {
+        if (!interface->have_bulk_in || !interface->have_bulk_out) {
             continue;
         }
         uint8_t watch_index = interface->i_interface != 0 ?
@@ -843,6 +842,26 @@ update_configuration_candidates(device_track_t *track, const field_info *configu
 }
 
 static void
+update_interface_candidate(gpointer key _U_, gpointer value, gpointer user_data)
+{
+    interface_candidate_t *candidate = (interface_candidate_t *)value;
+    uint8_t string_index = *(uint8_t *)user_data;
+
+    if (candidate->watch_index == string_index) {
+        candidate->confirmed = true;
+    }
+}
+
+static gboolean
+remove_matching_interface_candidate(gpointer key _U_, gpointer value, gpointer user_data)
+{
+    interface_candidate_t *candidate = (interface_candidate_t *)value;
+    uint8_t string_index = *(uint8_t *)user_data;
+
+    return candidate->watch_index == string_index;
+}
+
+static void
 process_string_response(device_track_t *track, uint32_t request_frame,
     const field_info *descriptor_type, const char *string_value,
     uint16_t bus_id, uint32_t device_address)
@@ -860,22 +879,10 @@ process_string_response(device_track_t *track, uint32_t request_frame,
     uint8_t string_index = (uint8_t)(GPOINTER_TO_UINT(index_value) - 1);
     wmem_map_remove(track->string_requests, GUINT_TO_POINTER(request_frame + 1));
     bool matches = string_contains_cmsis_dap(string_value);
-    unsigned candidate_count = wmem_map_size(track->candidates);
-    bool removed_candidate = false;
-    for (unsigned i = 0; i < 256; i++) {
-        interface_candidate_t *candidate = lookup_interface_candidate(track, (uint8_t)i);
-        if (candidate == NULL || candidate->watch_index != string_index) {
-            continue;
-        }
-        if (matches) {
-            candidate->confirmed = true;
-        } else {
-            wmem_map_remove(track->candidates, GUINT_TO_POINTER(i + 1));
-            candidate_count--;
-            removed_candidate = true;
-        }
-    }
-    if (removed_candidate && candidate_count == 0) {
+    if (matches) {
+        wmem_map_foreach(track->candidates, update_interface_candidate, &string_index);
+    } else if (wmem_map_foreach_remove(track->candidates, remove_matching_interface_candidate,
+            &string_index) > 0 && wmem_map_size(track->candidates) == 0) {
         wmem_map_remove(device_tracks, device_track_key(bus_id, device_address));
     }
 }

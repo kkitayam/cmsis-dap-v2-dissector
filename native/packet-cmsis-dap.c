@@ -603,18 +603,15 @@ usb_first_field_uint(proto_tree *tree, int hfindex, field_info **first_field)
     GPtrArray *fields = proto_find_finfo(tree, hfindex);
     int value = -1;
 
-    if (first_field != NULL) {
-        *first_field = NULL;
-    }
     if (fields->len > 0) {
         g_ptr_array_sort(fields, compare_field_info_start);
         field_info *field = (field_info *)g_ptr_array_index(fields, 0);
-        if (first_field != NULL) {
-            *first_field = field;
-        }
         uint32_t first_value = fvalue_get_uinteger(field->value);
         if (first_value <= INT_MAX) {
             value = (int)first_value;
+            if (first_field != NULL) {
+                *first_field = field;
+            }
         }
     }
     g_ptr_array_free(fields, true);

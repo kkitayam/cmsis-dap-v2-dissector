@@ -818,14 +818,8 @@ remove_matching_interface_candidate(gpointer key _U_, gpointer value, gpointer u
 
 static void
 process_string_response(device_track_t *track, uint32_t request_frame,
-    const field_info *descriptor_type, const char *string_value,
-    uint16_t bus_id, uint32_t device_address)
+    const char *string_value, uint16_t bus_id, uint32_t device_address)
 {
-    if (!usb_single_descriptor_is_complete(descriptor_type, USB_DESCRIPTOR_STRING, 2,
-            NULL, NULL)) {
-        return;
-    }
-
     void *index_value = wmem_map_lookup(track->string_requests,
         GUINT_TO_POINTER(request_frame + 1));
     if (!index_value) {
@@ -881,13 +875,15 @@ dissect_usb_identity(tvbuff_t *tvb _U_, packet_info *pinfo, proto_tree *tree,
             }
             record_string_request(track, pinfo, descriptor_index);
         } else if (track != NULL) {
-            uint32_t request_frame;
-            if (usb_first_field_uint(tree, hf_usb_request_in, &request_frame, NULL)) {
-                const char *string_value = usb_first_field_string(tree, hf_usb_string);
-                if (string_value) {
-                    process_string_response(track, request_frame,
-                        descriptor_type_field, string_value,
-                        bus_id, device_address);
+            if (usb_single_descriptor_is_complete(descriptor_type_field,
+                    USB_DESCRIPTOR_STRING, 2, NULL, NULL)) {
+                uint32_t request_frame;
+                if (usb_first_field_uint(tree, hf_usb_request_in, &request_frame, NULL)) {
+                    const char *string_value = usb_first_field_string(tree, hf_usb_string);
+                    if (string_value) {
+                        process_string_response(track, request_frame, string_value,
+                            bus_id, device_address);
+                    }
                 }
             }
         }

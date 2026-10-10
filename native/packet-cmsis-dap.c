@@ -596,30 +596,10 @@ compare_field_info_start(gconstpointer left_pointer, gconstpointer right_pointer
     return (left->start > right->start) - (left->start < right->start);
 }
 
-/* first_field, when requested, points into the proto tree and outlives the result array. */
-static int
-usb_first_field_uint(proto_tree *tree, int hfindex, field_info **first_field)
-{
-    GPtrArray *fields = proto_find_finfo(tree, hfindex);
-    int value = -1;
-
-    if (fields->len > 0) {
-        g_ptr_array_sort(fields, compare_field_info_start);
-        field_info *field = (field_info *)g_ptr_array_index(fields, 0);
-        uint32_t first_value = fvalue_get_uinteger(field->value);
-        if (first_value <= INT_MAX) {
-            value = (int)first_value;
-            if (first_field != NULL) {
-                *first_field = field;
-            }
-        }
-    }
-    g_ptr_array_free(fields, true);
-    return value;
-}
-
+/* Optional outputs are written only when a field is found. */
 static bool
-usb_try_first_field_uint32(proto_tree *tree, int hfindex, uint32_t *value)
+usb_first_field_uint(proto_tree *tree, int hfindex, uint32_t *value,
+    field_info **first_field)
 {
     GPtrArray *fields = proto_find_finfo(tree, hfindex);
     bool found = fields->len > 0;
@@ -627,7 +607,12 @@ usb_try_first_field_uint32(proto_tree *tree, int hfindex, uint32_t *value)
     if (found) {
         g_ptr_array_sort(fields, compare_field_info_start);
         field_info *field = (field_info *)g_ptr_array_index(fields, 0);
-        *value = fvalue_get_uinteger(field->value);
+        if (value) {
+            *value = fvalue_get_uinteger(field->value);
+        }
+        if (first_field) {
+            *first_field = field;
+        }
     }
     g_ptr_array_free(fields, true);
     return found;
@@ -879,10 +864,10 @@ dissect_usb_identity(tvbuff_t *tvb _U_, packet_info *pinfo, proto_tree *tree,
     }
     uint16_t bus_id;
     uint32_t device_address = get_usb_device_address_for_identity(pinfo, &bus_id);
+    uint32_t descriptor_type;
     field_info *descriptor_type_field;
-    int descriptor_type = usb_first_field_uint(tree, hf_usb_descriptor_type,
-        &descriptor_type_field);
-    if (device_address == 0 || descriptor_type < 0) {
+    if (device_address == 0 || !usb_first_field_uint(tree, hf_usb_descriptor_type,
+            &descriptor_type, &descriptor_type_field)) {
         return 0;
     }
 
@@ -902,15 +887,15 @@ dissect_usb_identity(tvbuff_t *tvb _U_, packet_info *pinfo, proto_tree *tree,
         break;
     }
     case USB_DESCRIPTOR_STRING: {
-        int descriptor_index = usb_first_field_uint(tree, hf_usb_descriptor_index, NULL);
-        if (descriptor_index >= 0) {
+        uint32_t descriptor_index;
+        if (usb_first_field_uint(tree, hf_usb_descriptor_index, &descriptor_index, NULL)) {
             if (track == NULL) {
                 track = get_device_track(bus_id, device_address);
             }
-            record_string_request(track, pinfo, (uint32_t)descriptor_index);
+            record_string_request(track, pinfo, descriptor_index);
         } else if (track != NULL) {
             uint32_t request_frame;
-            if (usb_try_first_field_uint32(tree, hf_usb_request_in, &request_frame)) {
+            if (usb_first_field_uint(tree, hf_usb_request_in, &request_frame, NULL)) {
                 const char *string_value = usb_first_field_string(tree, hf_usb_string);
                 process_string_response(track, request_frame,
                     descriptor_type_field, string_value,
@@ -920,8 +905,8 @@ dissect_usb_identity(tvbuff_t *tvb _U_, packet_info *pinfo, proto_tree *tree,
         break;
     }
     case USB_DESCRIPTOR_CONFIGURATION: {
-        int descriptor_index = usb_first_field_uint(tree, hf_usb_descriptor_index, NULL);
-        if (descriptor_index < 0) {
+        uint32_t descriptor_index;
+        if (!usb_first_field_uint(tree, hf_usb_descriptor_index, &descriptor_index, NULL)) {
             if (track == NULL) {
                 track = get_device_track(bus_id, device_address);
             }

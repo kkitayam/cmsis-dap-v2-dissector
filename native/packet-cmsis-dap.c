@@ -739,7 +739,7 @@ dissect_usb_identity(tvbuff_t *tvb _U_, packet_info *pinfo, proto_tree *tree,
 
 /* Reads up to max continuation bytes; returns the byte count or -1 when truncated. */
 static int
-swo_continuation(tvbuff_t *tvb, unsigned offset, unsigned max, uint32_t *value)
+swo_continuation(tvbuff_t *tvb, unsigned offset, unsigned max)
 {
     unsigned length = tvb_captured_length(tvb), n = 0;
     uint8_t byte;
@@ -748,29 +748,38 @@ swo_continuation(tvbuff_t *tvb, unsigned offset, unsigned max, uint32_t *value)
         if (offset + n >= length)
             return -1;
         byte = tvb_get_uint8(tvb, offset + n);
-        if (n < 5)
-            *value |= (uint32_t)(byte & 0x7f) << (7 * n);
         n++;
     } while ((byte & 0x80) && n < max);
     return n;
 }
 
-typedef struct {
-    int type;
-    int hfindex;
-    unsigned start;
-    unsigned plen;
-    uint32_t timestamp;
-} swo_packet_t;
-
 static void
-add_swo_packet(tvbuff_t *tvb, proto_tree *tree, const swo_packet_t *pkt)
+add_swo_packet(tvbuff_t *tvb, proto_tree *tree, unsigned start, unsigned plen)
 {
-    const int type = pkt->type;
-    const unsigned start = pkt->start, plen = pkt->plen;
     uint8_t header = tvb_get_uint8(tvb, start);
+    int type, hfindex;
+
+    if (header == 0) {
+        type = 0;
+        hfindex = hf_swo_sync;
+    } else if (header & 0x03) {
+        type = (header & 0x04) ? 5 : 6;
+        hfindex = type == 5 ? hf_swo_dwt : hf_swo_itm;
+    } else if (header == 0x70) {
+        type = 1;
+        hfindex = hf_swo_overflow_packet;
+    } else if ((header & 0x0c) == 0) {
+        type = 2;
+        hfindex = hf_swo_local_timestamp;
+    } else if ((header & 0x0b) == 0x08) {
+        type = 4;
+        hfindex = hf_swo_extension;
+    } else {
+        type = 3;
+        hfindex = hf_swo_global_timestamp;
+    }
     proto_tree *sub = proto_item_add_subtree(
-        proto_tree_add_item(tree, pkt->hfindex, tvb, start, plen, ENC_NA), ett_swo_packet);
+        proto_tree_add_item(tree, hfindex, tvb, start, plen, ENC_NA), ett_swo_packet);
 
     if (type >= 5) {
         add_fields(sub, tvb, start, 1, swo_dwt_header_fields);
@@ -788,7 +797,11 @@ add_swo_packet(tvbuff_t *tvb, proto_tree *tree, const swo_packet_t *pkt)
         add_le(sub, tvb, hf_swo_lts_timestamp, start, 1);
     } else if (type == 2) {
         add_le(sub, tvb, hf_swo_lts_timestamp_control, start, 1);
-        proto_tree_add_uint(sub, hf_swo_packet_timestamp, tvb, start + 1, plen - 1, pkt->timestamp);
+        uint32_t timestamp = 0;
+        for (unsigned i = 1; i < plen; i++)
+            timestamp |= (uint32_t)(tvb_get_uint8(tvb, start + i) & 0x7f) << (7 * (i - 1));
+        proto_tree_add_uint(sub, hf_swo_packet_timestamp, tvb, start + 1, plen - 1,
+            timestamp);
     } else if (type == 4 && !(header & 0x80)) {
         add_le(sub, tvb, hf_swo_packet_source_type, start, 1);
         add_le(sub, tvb, hf_swo_packet_page, start, 1);
@@ -806,8 +819,7 @@ parse_swo_stream(tvbuff_t *tvb, proto_tree *tree, wmem_strbuf_t *summary,
     while (offset < length) {
         unsigned start = offset, plen = 1, max_ext = 0;
         uint8_t header = tvb_get_uint8(tvb, offset);
-        uint32_t timestamp = 0;
-        int type, hfindex, n;
+        int type, n;
 
         if (header == 0) {
             while (offset < length && tvb_get_uint8(tvb, offset) == 0)
@@ -816,7 +828,6 @@ parse_swo_stream(tvbuff_t *tvb, proto_tree *tree, wmem_strbuf_t *summary,
                 return start;
             plen = offset - start;
             type = -1;
-            hfindex = hf_swo_sync;
             if (plen >= 5 && tvb_get_uint8(tvb, offset) == 0x80) {
                 plen++;
                 offset++;
@@ -827,15 +838,12 @@ parse_swo_stream(tvbuff_t *tvb, proto_tree *tree, wmem_strbuf_t *summary,
             if (length - start < plen)
                 return start;
             type = (header & 0x04) ? 5 : 6;
-            hfindex = type == 5 ? hf_swo_dwt : hf_swo_itm;
             offset += plen;
         } else if (header == 0x70) {
             type = 1;
-            hfindex = hf_swo_overflow_packet;
             offset++;
         } else if ((header & 0x0c) == 0) {
             type = 2;
-            hfindex = hf_swo_local_timestamp;
             offset++;
             if (header & 0x80) {
                 if (!(header & 0x40))
@@ -844,30 +852,24 @@ parse_swo_stream(tvbuff_t *tvb, proto_tree *tree, wmem_strbuf_t *summary,
             }
         } else if ((header & 0x0b) == 0x08) {
             type = 4;
-            hfindex = hf_swo_extension;
             offset++;
             max_ext = (header & 0x80) ? 4 : 0;
         } else if ((header & 0xdc) == 0x94) {
             type = 3;
-            hfindex = hf_swo_global_timestamp;
             offset++;
             max_ext = header == 0x94 ? 4 : 6;
         } else {
             return start;
         }
-
         if (max_ext) {
-            n = swo_continuation(tvb, offset, max_ext, &timestamp);
+            n = swo_continuation(tvb, offset, max_ext);
             if (n < 0)
                 return start;
             offset += n;
             plen += n;
         }
-        if (type >= 0) {
-            swo_packet_t pkt = { type, hfindex, start, plen, timestamp };
-
-            add_swo_packet(tvb, tree, &pkt);
-        }
+        if (type >= 0)
+            add_swo_packet(tvb, tree, start, plen);
         wmem_strbuf_append_printf(summary, "%s ", val_to_str_const(type, swo_packet_names,
             "UNK"));
         (*packet_count)++;

@@ -415,7 +415,7 @@ add_subtree(proto_tree *tree, tvbuff_t *tvb, int hfindex, int ett, unsigned off,
 }
 
 static proto_tree *
-add_root(proto_tree *tree, tvbuff_t *tvb)
+add_root(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *tree)
 {
     proto_item *item = proto_tree_add_item(tree, proto_cmsis_dap, tvb, 0,
         tvb_captured_length(tvb), ENC_NA);
@@ -425,13 +425,14 @@ add_root(proto_tree *tree, tvbuff_t *tvb)
 }
 
 static void
-add_generated_frame(proto_tree *tree, int hfindex, tvbuff_t *tvb, uint32_t frame)
+add_generated_frame(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *tree,
+    int hfindex, uint32_t frame)
 {
     proto_item_set_generated(proto_tree_add_uint(tree, hfindex, tvb, 0, 0, frame));
 }
 
 static void
-add_malformed(proto_tree *tree, packet_info *pinfo, tvbuff_t *tvb, const char *message)
+add_malformed(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, const char *message)
 {
     if (tree)
         proto_tree_add_expert_format(tree, pinfo, &ei_malformed, tvb, 0,
@@ -439,8 +440,8 @@ add_malformed(proto_tree *tree, packet_info *pinfo, tvbuff_t *tvb, const char *m
 }
 
 static void
-add_status(tvbuff_t *tvb, proto_tree *tree, unsigned off, unsigned payload_length,
-    wmem_strbuf_t *summary)
+add_status(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *tree, unsigned off,
+    unsigned payload_length, wmem_strbuf_t *summary)
 {
     if (payload_length == 0)
         return;
@@ -757,8 +758,8 @@ swo_continuation(tvbuff_t *tvb, unsigned offset, unsigned max, uint32_t *value)
 }
 
 static void
-add_swo_packet(proto_tree *tree, tvbuff_t *tvb, int type, int hfindex, unsigned start,
-    unsigned plen, uint32_t timestamp)
+add_swo_packet(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *tree, int type,
+    int hfindex, unsigned start, unsigned plen, uint32_t timestamp)
 {
     uint8_t header = tvb_get_uint8(tvb, start);
     proto_tree *sub = proto_item_add_subtree(
@@ -789,7 +790,7 @@ add_swo_packet(proto_tree *tree, tvbuff_t *tvb, int type, int hfindex, unsigned 
 
 /* Returns the offset of the first byte of an incomplete trailing packet. */
 static unsigned
-parse_swo_stream(tvbuff_t *tvb, proto_tree *tree, wmem_strbuf_t *summary,
+parse_swo_stream(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *tree, wmem_strbuf_t *summary,
     unsigned *packet_count)
 {
     unsigned length = tvb_captured_length(tvb), offset = 0;
@@ -856,7 +857,7 @@ parse_swo_stream(tvbuff_t *tvb, proto_tree *tree, wmem_strbuf_t *summary,
             plen += n;
         }
         if (type >= 0)
-            add_swo_packet(tree, tvb, type, hfindex, start, plen, timestamp);
+            add_swo_packet(tvb, pinfo, tree, type, hfindex, start, plen, timestamp);
         wmem_strbuf_append_printf(summary, "%s ", val_to_str_const(type, swo_packet_names,
             "UNK"));
         (*packet_count)++;
@@ -870,7 +871,7 @@ dissect_trace(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, device_state_
 {
     const bool first_pass = !PINFO_FD_VISITED(pinfo);
     unsigned current_length = tvb_captured_length(tvb), parsed, packet_count, total;
-    proto_tree *dap_tree = add_root(tree, tvb);
+    proto_tree *dap_tree = add_root(tvb, pinfo, tree);
     wmem_strbuf_t *summary = wmem_strbuf_new(wmem_packet_scope(), "");
     uint8_t *merged;
     tvbuff_t *stream;
@@ -884,12 +885,12 @@ dissect_trace(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, device_state_
     merged = wmem_alloc(wmem_packet_scope(), total);
     memcpy(merged, frame->trace_prefix, frame->trace_prefix_length);
     if (frame->trace_prefix_length > 0 && frame->trace_prefix_frame != 0)
-        add_generated_frame(dap_tree, hf_swo_reassembled, tvb, frame->trace_prefix_frame);
+        add_generated_frame(tvb, pinfo, dap_tree, hf_swo_reassembled, frame->trace_prefix_frame);
     tvb_memcpy(tvb, merged + frame->trace_prefix_length, 0, current_length);
 
     stream = tvb_new_child_real_data(tvb, merged, total, total);
     add_new_data_source(pinfo, stream, "Reassembled SWO trace");
-    parsed = parse_swo_stream(stream, dap_tree, summary, &packet_count);
+    parsed = parse_swo_stream(stream, pinfo, dap_tree, summary, &packet_count);
     if (first_pass) {
         state->trace_tail_length = total - parsed;
         state->trace_tail_frame = 0;
@@ -915,7 +916,7 @@ dissect_info(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, unsigned off,
     const char *name = val_to_str_const(info_id, info_names, "Info");
 
     if (off >= length) {
-        add_malformed(tree, pinfo, tvb, "Info packet is missing its ID or length");
+        add_malformed(tvb, pinfo, tree, "Info packet is missing its ID or length");
         return;
     }
     len = tvb_get_uint8(tvb, off);
@@ -926,7 +927,7 @@ dissect_info(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, unsigned off,
     }
     add_le(tree, tvb, hf_info_len, off, 1);
     if (length - off < len + 1) {
-        add_malformed(tree, pinfo, tvb, "Info response is shorter than its declared length");
+        add_malformed(tvb, pinfo, tree, "Info response is shorter than its declared length");
         return;
     }
     wmem_strbuf_append(summary, name);
@@ -958,7 +959,7 @@ dissect_info(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, unsigned off,
         proto_tree *caps;
 
         if (len < 2) {
-            add_malformed(tree, pinfo, tvb, "Capabilities Info response must contain 2 bytes");
+            add_malformed(tvb, pinfo, tree, "Capabilities Info response must contain 2 bytes");
             break;
         }
         caps = add_subtree(tree, tvb, hf_info_capabilities, ett_info_capabilities, off + 1, 2);
@@ -986,7 +987,7 @@ dissect_transfer(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, unsigned o
     const bool record = request != NULL && !PINFO_FD_VISITED(pinfo);
 
     if (length <= off + (is_request ? 1 : 0)) {
-        add_malformed(tree, pinfo, tvb, "Transfer packet is too short");
+        add_malformed(tvb, pinfo, tree, "Transfer packet is too short");
         return;
     }
     count = tvb_get_uint8(tvb, is_request ? off + 1 : off);
@@ -996,7 +997,7 @@ dissect_transfer(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, unsigned o
             wmem_array_get_count(request->transfers) : 0;
 
         if (length - off < 2) {
-            add_malformed(tree, pinfo, tvb, "Transfer response is missing its status");
+            add_malformed(tvb, pinfo, tree, "Transfer response is missing its status");
             return;
         }
         add_le(tree, tvb, hf_transfer_count, off, 1);
@@ -1009,13 +1010,13 @@ dissect_transfer(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, unsigned o
                 continue;
             if ((rq & 0x80) && !(rq & 0x30)) {
                 if (length - pos < 1) {
-                    add_malformed(tree, pinfo, tvb, "Transfer response timestamp is missing");
+                    add_malformed(tvb, pinfo, tree, "Transfer response timestamp is missing");
                     break;
                 }
                 add_le(tree, tvb, hf_transfer_read_timestamp, pos++, 1);
             }
             if (length - pos < 4) {
-                add_malformed(tree, pinfo, tvb, "Transfer response data is truncated");
+                add_malformed(tvb, pinfo, tree, "Transfer response data is truncated");
                 break;
             }
             add_le(tree, tvb, hf_transfer_read_data, pos, 4);
@@ -1044,7 +1045,7 @@ dissect_transfer(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, unsigned o
         char access = is_write ? 'W' : 'R';
 
         if (has_match && (rq & 0x80))
-            add_malformed(sub, pinfo, tvb,
+            add_malformed(tvb, pinfo, sub,
                 "Transfer timestamp cannot be combined with a match operation");
         if (parsed == 0 || access != previous)
             wmem_strbuf_append_c(accesses, access);
@@ -1053,7 +1054,7 @@ dissect_transfer(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, unsigned o
         add_fields(sub, tvb, pos++, 1, transfer_request_fields);
         if (is_write || has_match) {
             if (length - pos < 4) {
-                add_malformed(sub, pinfo, tvb, "Transfer request data is truncated");
+                add_malformed(tvb, pinfo, sub, "Transfer request data is truncated");
                 break;
             }
             add_le(sub, tvb, is_write ? ((rq & 0x20) ? hf_transfer_mask_data :
@@ -1084,13 +1085,13 @@ dissect_swd_sequence(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, unsign
     const bool record = request != NULL && !PINFO_FD_VISITED(pinfo);
 
     if (length <= off) {
-        add_malformed(tree, pinfo, tvb, is_request ?
+        add_malformed(tvb, pinfo, tree, is_request ?
             "SWD sequence request is missing its count" :
             "SWD sequence response is missing its status");
         return;
     }
     if (!is_request) {
-        add_status(tvb, tree, off, length - off, summary);
+        add_status(tvb, pinfo, tree, off, length - off, summary);
         if (request == NULL || request->swd_sequences == NULL) {
             if (pos < length)
                 proto_tree_add_item(tree, hf_swd_sequence_data, tvb, pos, length - pos, ENC_NA);
@@ -1103,7 +1104,7 @@ dissect_swd_sequence(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, unsign
             if (!(info & 0x80))
                 continue;
             if (length - pos < data_length) {
-                add_malformed(tree, pinfo, tvb, "SWD sequence input data is truncated");
+                add_malformed(tvb, pinfo, tree, "SWD sequence input data is truncated");
                 break;
             }
             proto_tree_add_item(tree, hf_swd_sequence_data, tvb, pos, data_length, ENC_NA);
@@ -1121,7 +1122,7 @@ dissect_swd_sequence(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, unsign
         unsigned data_length;
 
         if (pos >= length) {
-            add_malformed(tree, pinfo, tvb, "SWD sequence info is truncated");
+            add_malformed(tvb, pinfo, tree, "SWD sequence info is truncated");
             break;
         }
         info = tvb_get_uint8(tvb, pos);
@@ -1129,7 +1130,7 @@ dissect_swd_sequence(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, unsign
         add_le(tree, tvb, hf_swd_sequence_info, pos++, 1);
         if (!(info & 0x80)) {
             if (length - pos < data_length) {
-                add_malformed(tree, pinfo, tvb, "SWD sequence output data is truncated");
+                add_malformed(tvb, pinfo, tree, "SWD sequence output data is truncated");
                 break;
             }
             proto_tree_add_item(tree, hf_swd_sequence_data, tvb, pos, data_length, ENC_NA);
@@ -1142,7 +1143,8 @@ dissect_swd_sequence(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, unsign
 }
 
 static void
-dissect_transfer_block(tvbuff_t *tvb, proto_tree *tree, unsigned off, unsigned plen,
+dissect_transfer_block(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *tree,
+    unsigned off, unsigned plen,
     bool is_request, wmem_strbuf_t *summary)
 {
     unsigned length = tvb_captured_length(tvb);
@@ -1202,7 +1204,7 @@ dissect_command_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, bool i
         case CMD_SWO_MODE:
         case CMD_SWO_CONTROL:
         case CMD_DISCONNECT:
-            add_status(tvb, tree, off, plen, summary);
+            add_status(tvb, pinfo, tree, off, plen, summary);
             return;
         }
     }
@@ -1243,7 +1245,7 @@ dissect_command_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, bool i
         }
         break;
     case CMD_TRANSFER_BLOCK:
-        dissect_transfer_block(tvb, tree, off, plen, is_request, summary);
+        dissect_transfer_block(tvb, pinfo, tree, off, plen, is_request, summary);
         break;
     case CMD_WRITE_ABORT:
         if (plen >= 5) {
@@ -1332,7 +1334,7 @@ dissect_command_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, bool i
             add_le(tree, tvb, hf_swo_count, off + 1, 2);
             if (count > 0) {
                 proto_tree_add_item(tree, hf_swo_data, tvb, off + 3, plen - 3, ENC_NA);
-                parse_swo_stream(tvb_new_subset_length(tvb, off + 3, plen - 3), tree, types,
+                parse_swo_stream(tvb_new_subset_length(tvb, off + 3, plen - 3), pinfo, tree, types,
                     &parsed);
                 wmem_strbuf_append_printf(summary, "%u packet(s) %s", parsed,
                     wmem_strbuf_get_str(types));
@@ -1343,7 +1345,7 @@ dissect_command_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, bool i
         break;
     case CMD_RESET_TARGET:
         if (!is_request) {
-            add_status(tvb, tree, off, plen, summary);
+            add_status(tvb, pinfo, tree, off, plen, summary);
             if (plen >= 2)
                 add_le(tree, tvb, hf_execute, off + 1, 1);
         }
@@ -1440,11 +1442,11 @@ dissect_cmsis_dap(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *dat
         val_to_str_const(frame->command, command_names, "Unknown"),
         frame->is_request ? "Request" : "Response");
 
-    dap_tree = add_root(tree, tvb);
+    dap_tree = add_root(tvb, pinfo, tree);
     if (frame->is_request && frame->request->response_frame != 0)
-        add_generated_frame(dap_tree, hf_response, tvb, frame->request->response_frame);
+        add_generated_frame(tvb, pinfo, dap_tree, hf_response, frame->request->response_frame);
     else if (!frame->is_request && frame->request != NULL)
-        add_generated_frame(dap_tree, hf_request, tvb, frame->request->request_frame);
+        add_generated_frame(tvb, pinfo, dap_tree, hf_request, frame->request->request_frame);
     else if (!frame->is_request && dap_tree)
         proto_tree_add_expert(dap_tree, pinfo, &ei_packet_lost, tvb, 0, length);
     add_le(dap_tree, tvb, hf_command, 0, 1);

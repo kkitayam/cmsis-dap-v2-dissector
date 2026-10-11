@@ -425,8 +425,7 @@ add_root(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *tree)
 }
 
 static void
-add_generated_frame(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *tree,
-    int hfindex, uint32_t frame)
+add_generated_frame(tvbuff_t *tvb, proto_tree *tree, int hfindex, uint32_t frame)
 {
     proto_item_set_generated(proto_tree_add_uint(tree, hfindex, tvb, 0, 0, frame));
 }
@@ -440,13 +439,12 @@ add_malformed(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, const char *m
 }
 
 static void
-add_status(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *tree, unsigned off,
-    unsigned payload_length, wmem_strbuf_t *summary)
+add_status(tvbuff_t *tvb, proto_tree *tree, wmem_strbuf_t *summary)
 {
-    if (payload_length == 0)
+    if (tvb_captured_length(tvb) <= 1)
         return;
-    add_le(tree, tvb, hf_status, off, 1);
-    wmem_strbuf_append(summary, val_to_str_const(tvb_get_uint8(tvb, off), response_names,
+    add_le(tree, tvb, hf_status, 1, 1);
+    wmem_strbuf_append(summary, val_to_str_const(tvb_get_uint8(tvb, 1), response_names,
         "Unknown"));
 }
 
@@ -757,13 +755,22 @@ swo_continuation(tvbuff_t *tvb, unsigned offset, unsigned max, uint32_t *value)
     return n;
 }
 
+typedef struct {
+    int type;
+    int hfindex;
+    unsigned start;
+    unsigned plen;
+    uint32_t timestamp;
+} swo_packet_t;
+
 static void
-add_swo_packet(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *tree, int type,
-    int hfindex, unsigned start, unsigned plen, uint32_t timestamp)
+add_swo_packet(tvbuff_t *tvb, proto_tree *tree, const swo_packet_t *pkt)
 {
+    const int type = pkt->type;
+    const unsigned start = pkt->start, plen = pkt->plen;
     uint8_t header = tvb_get_uint8(tvb, start);
     proto_tree *sub = proto_item_add_subtree(
-        proto_tree_add_item(tree, hfindex, tvb, start, plen, ENC_NA), ett_swo_packet);
+        proto_tree_add_item(tree, pkt->hfindex, tvb, start, plen, ENC_NA), ett_swo_packet);
 
     if (type >= 5) {
         add_fields(sub, tvb, start, 1, swo_dwt_header_fields);
@@ -781,7 +788,7 @@ add_swo_packet(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *tree, int type
         add_le(sub, tvb, hf_swo_lts_timestamp, start, 1);
     } else if (type == 2) {
         add_le(sub, tvb, hf_swo_lts_timestamp_control, start, 1);
-        proto_tree_add_uint(sub, hf_swo_packet_timestamp, tvb, start + 1, plen - 1, timestamp);
+        proto_tree_add_uint(sub, hf_swo_packet_timestamp, tvb, start + 1, plen - 1, pkt->timestamp);
     } else if (type == 4 && !(header & 0x80)) {
         add_le(sub, tvb, hf_swo_packet_source_type, start, 1);
         add_le(sub, tvb, hf_swo_packet_page, start, 1);
@@ -790,7 +797,7 @@ add_swo_packet(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *tree, int type
 
 /* Returns the offset of the first byte of an incomplete trailing packet. */
 static unsigned
-parse_swo_stream(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *tree, wmem_strbuf_t *summary,
+parse_swo_stream(tvbuff_t *tvb, proto_tree *tree, wmem_strbuf_t *summary,
     unsigned *packet_count)
 {
     unsigned length = tvb_captured_length(tvb), offset = 0;
@@ -856,8 +863,11 @@ parse_swo_stream(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *tree, wmem_s
             offset += n;
             plen += n;
         }
-        if (type >= 0)
-            add_swo_packet(tvb, pinfo, tree, type, hfindex, start, plen, timestamp);
+        if (type >= 0) {
+            swo_packet_t pkt = { type, hfindex, start, plen, timestamp };
+
+            add_swo_packet(tvb, tree, &pkt);
+        }
         wmem_strbuf_append_printf(summary, "%s ", val_to_str_const(type, swo_packet_names,
             "UNK"));
         (*packet_count)++;
@@ -885,12 +895,12 @@ dissect_trace(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, device_state_
     merged = wmem_alloc(wmem_packet_scope(), total);
     memcpy(merged, frame->trace_prefix, frame->trace_prefix_length);
     if (frame->trace_prefix_length > 0 && frame->trace_prefix_frame != 0)
-        add_generated_frame(tvb, pinfo, dap_tree, hf_swo_reassembled, frame->trace_prefix_frame);
+        add_generated_frame(tvb, dap_tree, hf_swo_reassembled, frame->trace_prefix_frame);
     tvb_memcpy(tvb, merged + frame->trace_prefix_length, 0, current_length);
 
     stream = tvb_new_child_real_data(tvb, merged, total, total);
     add_new_data_source(pinfo, stream, "Reassembled SWO trace");
-    parsed = parse_swo_stream(stream, pinfo, dap_tree, summary, &packet_count);
+    parsed = parse_swo_stream(stream, dap_tree, summary, &packet_count);
     if (first_pass) {
         state->trace_tail_length = total - parsed;
         state->trace_tail_frame = 0;
@@ -1091,7 +1101,7 @@ dissect_swd_sequence(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, unsign
         return;
     }
     if (!is_request) {
-        add_status(tvb, pinfo, tree, off, length - off, summary);
+        add_status(tvb, tree, summary);
         if (request == NULL || request->swd_sequences == NULL) {
             if (pos < length)
                 proto_tree_add_item(tree, hf_swd_sequence_data, tvb, pos, length - pos, ENC_NA);
@@ -1143,11 +1153,12 @@ dissect_swd_sequence(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, unsign
 }
 
 static void
-dissect_transfer_block(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *tree,
-    unsigned off, unsigned plen,
-    bool is_request, wmem_strbuf_t *summary)
+dissect_transfer_block(tvbuff_t *tvb, proto_tree *tree, bool is_request,
+    wmem_strbuf_t *summary)
 {
+    const unsigned off = 1;
     unsigned length = tvb_captured_length(tvb);
+    unsigned plen = length - off;
     unsigned count, pos, i;
     proto_tree *sub;
     bool is_read;
@@ -1204,7 +1215,7 @@ dissect_command_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, bool i
         case CMD_SWO_MODE:
         case CMD_SWO_CONTROL:
         case CMD_DISCONNECT:
-            add_status(tvb, pinfo, tree, off, plen, summary);
+            add_status(tvb, tree, summary);
             return;
         }
     }
@@ -1245,7 +1256,7 @@ dissect_command_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, bool i
         }
         break;
     case CMD_TRANSFER_BLOCK:
-        dissect_transfer_block(tvb, pinfo, tree, off, plen, is_request, summary);
+        dissect_transfer_block(tvb, tree, is_request, summary);
         break;
     case CMD_WRITE_ABORT:
         if (plen >= 5) {
@@ -1334,7 +1345,7 @@ dissect_command_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, bool i
             add_le(tree, tvb, hf_swo_count, off + 1, 2);
             if (count > 0) {
                 proto_tree_add_item(tree, hf_swo_data, tvb, off + 3, plen - 3, ENC_NA);
-                parse_swo_stream(tvb_new_subset_length(tvb, off + 3, plen - 3), pinfo, tree, types,
+                parse_swo_stream(tvb_new_subset_length(tvb, off + 3, plen - 3), tree, types,
                     &parsed);
                 wmem_strbuf_append_printf(summary, "%u packet(s) %s", parsed,
                     wmem_strbuf_get_str(types));
@@ -1345,7 +1356,7 @@ dissect_command_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, bool i
         break;
     case CMD_RESET_TARGET:
         if (!is_request) {
-            add_status(tvb, pinfo, tree, off, plen, summary);
+            add_status(tvb, tree, summary);
             if (plen >= 2)
                 add_le(tree, tvb, hf_execute, off + 1, 1);
         }
@@ -1444,9 +1455,9 @@ dissect_cmsis_dap(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *dat
 
     dap_tree = add_root(tvb, pinfo, tree);
     if (frame->is_request && frame->request->response_frame != 0)
-        add_generated_frame(tvb, pinfo, dap_tree, hf_response, frame->request->response_frame);
+        add_generated_frame(tvb, dap_tree, hf_response, frame->request->response_frame);
     else if (!frame->is_request && frame->request != NULL)
-        add_generated_frame(tvb, pinfo, dap_tree, hf_request, frame->request->request_frame);
+        add_generated_frame(tvb, dap_tree, hf_request, frame->request->request_frame);
     else if (!frame->is_request && dap_tree)
         proto_tree_add_expert(dap_tree, pinfo, &ei_packet_lost, tvb, 0, length);
     add_le(dap_tree, tvb, hf_command, 0, 1);

@@ -439,9 +439,10 @@ add_malformed(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, const char *m
 }
 
 static void
-add_status(tvbuff_t *tvb, proto_tree *tree, wmem_strbuf_t *summary)
+add_status(tvbuff_t *tvb, proto_tree *tree, unsigned payload_length,
+    wmem_strbuf_t *summary)
 {
-    if (tvb_captured_length(tvb) <= 1)
+    if (payload_length == 0)
         return;
     add_le(tree, tvb, hf_status, 1, 1);
     wmem_strbuf_append(summary, val_to_str_const(tvb_get_uint8(tvb, 1), response_names,
@@ -737,9 +738,15 @@ dissect_usb_identity(tvbuff_t *tvb _U_, packet_info *pinfo, proto_tree *tree,
 
 /* ---- SWO ---- */
 
+/* Indexed by the packet types named in swo_packet_names. */
+static int *const swo_packet_hf[] = {
+    &hf_swo_sync, &hf_swo_overflow_packet, &hf_swo_local_timestamp,
+    &hf_swo_global_timestamp, &hf_swo_extension, &hf_swo_dwt, &hf_swo_itm
+};
+
 /* Reads up to max continuation bytes; returns the byte count or -1 when truncated. */
 static int
-swo_continuation(tvbuff_t *tvb, unsigned offset, unsigned max)
+swo_continuation(tvbuff_t *tvb, unsigned offset, unsigned max, uint32_t *value)
 {
     unsigned length = tvb_captured_length(tvb), n = 0;
     uint8_t byte;
@@ -748,64 +755,25 @@ swo_continuation(tvbuff_t *tvb, unsigned offset, unsigned max)
         if (offset + n >= length)
             return -1;
         byte = tvb_get_uint8(tvb, offset + n);
+        if (n < 5)
+            *value |= (uint32_t)(byte & 0x7f) << (7 * n);
         n++;
     } while ((byte & 0x80) && n < max);
     return n;
 }
 
 static void
-add_swo_packet(tvbuff_t *tvb, proto_tree *tree, unsigned start, unsigned plen)
+add_swo_source_packet(tvbuff_t *tvb, proto_tree *tree, unsigned start, unsigned plen)
 {
     uint8_t header = tvb_get_uint8(tvb, start);
-    int type, hfindex;
 
-    if (header == 0) {
-        type = 0;
-        hfindex = hf_swo_sync;
-    } else if (header & 0x03) {
-        type = (header & 0x04) ? 5 : 6;
-        hfindex = type == 5 ? hf_swo_dwt : hf_swo_itm;
-    } else if (header == 0x70) {
-        type = 1;
-        hfindex = hf_swo_overflow_packet;
-    } else if ((header & 0x0c) == 0) {
-        type = 2;
-        hfindex = hf_swo_local_timestamp;
-    } else if ((header & 0x0b) == 0x08) {
-        type = 4;
-        hfindex = hf_swo_extension;
-    } else {
-        type = 3;
-        hfindex = hf_swo_global_timestamp;
-    }
-    proto_tree *sub = proto_item_add_subtree(
-        proto_tree_add_item(tree, hfindex, tvb, start, plen, ENC_NA), ett_swo_packet);
-
-    if (type >= 5) {
-        add_fields(sub, tvb, start, 1, swo_dwt_header_fields);
-        if (plen - 1 <= 4)
-            add_le(sub, tvb, hf_swo_packet_payload, start + 1, plen - 1);
-        if (header == 0x05)
-            add_fields(sub, tvb, start + 1, 1, swo_event_fields);
-        else if (header == 0x0e && plen >= 3)
-            add_fields(sub, tvb, start + 1, 2, swo_exception_fields);
-        return;
-    }
-    add_le(sub, tvb, hf_swo_packet_header, start, 1);
-    if (type == 2 && !(header & 0x80)) {
-        add_le(sub, tvb, hf_swo_lts_type, start, 1);
-        add_le(sub, tvb, hf_swo_lts_timestamp, start, 1);
-    } else if (type == 2) {
-        add_le(sub, tvb, hf_swo_lts_timestamp_control, start, 1);
-        uint32_t timestamp = 0;
-        for (unsigned i = 1; i < plen; i++)
-            timestamp |= (uint32_t)(tvb_get_uint8(tvb, start + i) & 0x7f) << (7 * (i - 1));
-        proto_tree_add_uint(sub, hf_swo_packet_timestamp, tvb, start + 1, plen - 1,
-            timestamp);
-    } else if (type == 4 && !(header & 0x80)) {
-        add_le(sub, tvb, hf_swo_packet_source_type, start, 1);
-        add_le(sub, tvb, hf_swo_packet_page, start, 1);
-    }
+    add_fields(tree, tvb, start, 1, swo_dwt_header_fields);
+    if (plen - 1 <= 4)
+        add_le(tree, tvb, hf_swo_packet_payload, start + 1, plen - 1);
+    if (header == 0x05)
+        add_fields(tree, tvb, start + 1, 1, swo_event_fields);
+    else if (header == 0x0e && plen >= 3)
+        add_fields(tree, tvb, start + 1, 2, swo_exception_fields);
 }
 
 /* Returns the offset of the first byte of an incomplete trailing packet. */
@@ -819,6 +787,7 @@ parse_swo_stream(tvbuff_t *tvb, proto_tree *tree, wmem_strbuf_t *summary,
     while (offset < length) {
         unsigned start = offset, plen = 1, max_ext = 0;
         uint8_t header = tvb_get_uint8(tvb, offset);
+        uint32_t timestamp = 0;
         int type, n;
 
         if (header == 0) {
@@ -862,14 +831,33 @@ parse_swo_stream(tvbuff_t *tvb, proto_tree *tree, wmem_strbuf_t *summary,
             return start;
         }
         if (max_ext) {
-            n = swo_continuation(tvb, offset, max_ext);
+            n = swo_continuation(tvb, offset, max_ext, &timestamp);
             if (n < 0)
                 return start;
             offset += n;
             plen += n;
         }
-        if (type >= 0)
-            add_swo_packet(tvb, tree, start, plen);
+        if (type >= 0) {
+            proto_tree *sub = proto_item_add_subtree(proto_tree_add_item(tree,
+                *swo_packet_hf[type], tvb, start, plen, ENC_NA), ett_swo_packet);
+
+            if (type >= 5) {
+                add_swo_source_packet(tvb, sub, start, plen);
+            } else {
+                add_le(sub, tvb, hf_swo_packet_header, start, 1);
+                if (type == 2 && !(header & 0x80)) {
+                    add_le(sub, tvb, hf_swo_lts_type, start, 1);
+                    add_le(sub, tvb, hf_swo_lts_timestamp, start, 1);
+                } else if (type == 2) {
+                    add_le(sub, tvb, hf_swo_lts_timestamp_control, start, 1);
+                    proto_tree_add_uint(sub, hf_swo_packet_timestamp, tvb, start + 1,
+                        plen - 1, timestamp);
+                } else if (type == 4 && !(header & 0x80)) {
+                    add_le(sub, tvb, hf_swo_packet_source_type, start, 1);
+                    add_le(sub, tvb, hf_swo_packet_page, start, 1);
+                }
+            }
+        }
         wmem_strbuf_append_printf(summary, "%s ", val_to_str_const(type, swo_packet_names,
             "UNK"));
         (*packet_count)++;
@@ -1103,7 +1091,7 @@ dissect_swd_sequence(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, unsign
         return;
     }
     if (!is_request) {
-        add_status(tvb, tree, summary);
+        add_status(tvb, tree, length - off, summary);
         if (request == NULL || request->swd_sequences == NULL) {
             if (pos < length)
                 proto_tree_add_item(tree, hf_swd_sequence_data, tvb, pos, length - pos, ENC_NA);
@@ -1155,45 +1143,54 @@ dissect_swd_sequence(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, unsign
 }
 
 static void
-dissect_transfer_block(tvbuff_t *tvb, proto_tree *tree, bool is_request,
+add_block_words(tvbuff_t *tvb, proto_tree *tree, int hfindex, unsigned pos, unsigned count)
+{
+    unsigned length = tvb_captured_length(tvb);
+
+    for (unsigned i = 0; i < count && length - pos >= 4; i++, pos += 4)
+        add_le(tree, tvb, hfindex, pos, 4);
+}
+
+/* The payload starts at byte 1; plen is the payload length. */
+static void
+dissect_block_request(tvbuff_t *tvb, proto_tree *tree, unsigned plen,
     wmem_strbuf_t *summary)
 {
-    const unsigned off = 1;
-    unsigned length = tvb_captured_length(tvb);
-    unsigned plen = length - off;
-    unsigned count, pos, i;
-    proto_tree *sub;
+    unsigned count;
     bool is_read;
-    int data_hf;
 
-    if (is_request && plen >= 4) {
-        count = tvb_get_letohs(tvb, off + 1);
-        is_read = tvb_get_uint8(tvb, off + 3) & 0x02;
-        pos = off + 4;
-        data_hf = hf_transfer_write_data;
-        add_le(tree, tvb, hf_dap_index, off, 1);
-        add_le(tree, tvb, hf_transfer_block_count, off + 1, 2);
-        sub = add_subtree(tree, tvb, hf_transfer_request, ett_transfer, off + 3, 1);
-        add_fields(sub, tvb, off + 3, 1, block_request_fields);
-        wmem_strbuf_append_printf(summary, "%u word(s) %s", count, is_read ? "Read" : "Write");
-    } else if (!is_request && plen >= 3) {
-        count = tvb_get_letohs(tvb, off);
-        is_read = plen > 3;
-        pos = off + 3;
-        data_hf = hf_transfer_read_data;
-        add_le(tree, tvb, hf_transfer_block_count, off, 2);
-        sub = add_subtree(tree, tvb, hf_transfer_response, ett_transfer, off + 2, 1);
-        add_fields(sub, tvb, off + 2, 1, block_response_fields);
-        wmem_strbuf_append_printf(summary, "%s %u word(s) %s",
-            val_to_str_const(tvb_get_uint8(tvb, off + 2) & 0x07, ack_names, "Unknown"), count,
-            is_read ? "Read" : "Write");
-    } else {
+    if (plen < 4)
         return;
-    }
-    /* Request data follows a write; response data follows a read. */
-    if (is_read != is_request)
-        for (i = 0; i < count && length - pos >= 4; i++, pos += 4)
-            add_le(tree, tvb, data_hf, pos, 4);
+    count = tvb_get_letohs(tvb, 2);
+    is_read = tvb_get_uint8(tvb, 4) & 0x02;
+    add_le(tree, tvb, hf_dap_index, 1, 1);
+    add_le(tree, tvb, hf_transfer_block_count, 2, 2);
+    add_fields(add_subtree(tree, tvb, hf_transfer_request, ett_transfer, 4, 1), tvb, 4, 1,
+        block_request_fields);
+    wmem_strbuf_append_printf(summary, "%u word(s) %s", count, is_read ? "Read" : "Write");
+    if (!is_read)
+        add_block_words(tvb, tree, hf_transfer_write_data, 5, count);
+}
+
+static void
+dissect_block_response(tvbuff_t *tvb, proto_tree *tree, unsigned plen,
+    wmem_strbuf_t *summary)
+{
+    unsigned count;
+    bool is_read;
+
+    if (plen < 3)
+        return;
+    count = tvb_get_letohs(tvb, 1);
+    is_read = plen > 3;
+    add_le(tree, tvb, hf_transfer_block_count, 1, 2);
+    add_fields(add_subtree(tree, tvb, hf_transfer_response, ett_transfer, 3, 1), tvb, 3, 1,
+        block_response_fields);
+    wmem_strbuf_append_printf(summary, "%s %u word(s) %s",
+        val_to_str_const(tvb_get_uint8(tvb, 3) & 0x07, ack_names, "Unknown"), count,
+        is_read ? "Read" : "Write");
+    if (is_read)
+        add_block_words(tvb, tree, hf_transfer_read_data, 4, count);
 }
 
 static void
@@ -1217,7 +1214,7 @@ dissect_command_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, bool i
         case CMD_SWO_MODE:
         case CMD_SWO_CONTROL:
         case CMD_DISCONNECT:
-            add_status(tvb, tree, summary);
+            add_status(tvb, tree, plen, summary);
             return;
         }
     }
@@ -1258,7 +1255,10 @@ dissect_command_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, bool i
         }
         break;
     case CMD_TRANSFER_BLOCK:
-        dissect_transfer_block(tvb, tree, is_request, summary);
+        if (is_request)
+            dissect_block_request(tvb, tree, plen, summary);
+        else
+            dissect_block_response(tvb, tree, plen, summary);
         break;
     case CMD_WRITE_ABORT:
         if (plen >= 5) {
@@ -1358,7 +1358,7 @@ dissect_command_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, bool i
         break;
     case CMD_RESET_TARGET:
         if (!is_request) {
-            add_status(tvb, tree, summary);
+            add_status(tvb, tree, plen, summary);
             if (plen >= 2)
                 add_le(tree, tvb, hf_execute, off + 1, 1);
         }

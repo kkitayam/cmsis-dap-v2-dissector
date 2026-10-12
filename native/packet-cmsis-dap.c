@@ -208,6 +208,11 @@ static int *const info_string_fields[] = {
 
 static dissector_handle_t usb_identity_handle;
 
+enum {
+    PROTO_DATA_FRAME = 0,
+    PROTO_DATA_TRACE = 1
+};
+
 typedef struct {
     uint8_t out;
     uint8_t in;
@@ -244,7 +249,6 @@ typedef struct {
 
 typedef struct {
     request_record_t *request;
-    trace_fragment_t prefix;
 } frame_record_t;
 
 typedef struct {
@@ -877,8 +881,6 @@ dissect_trace(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
     uint8_t *merged;
     tvbuff_t *stream;
 
-    if (first_pass)
-        *prefix = *tail;
     unsigned total = current_length + prefix->len;
     merged = wmem_alloc(wmem_packet_scope(), total);
     memcpy(merged, prefix->buf, prefix->len);
@@ -1388,7 +1390,6 @@ new_frame_record(tvbuff_t *tvb, packet_info *pinfo, const urb_info_t *urb,
     frame_record_t *frame = wmem_new0(wmem_file_scope(), frame_record_t);
     request_record_t *request = NULL;
     unsigned i, n;
-    const bool is_trace = state->eps.trace && urb->endpoint == state->eps.trace;
 
     if (urb_is_request(urb)) {
         request = wmem_new0(wmem_file_scope(), request_record_t);
@@ -1397,7 +1398,7 @@ new_frame_record(tvbuff_t *tvb, packet_info *pinfo, const urb_info_t *urb,
         if (command == CMD_INFO && tvb_captured_length(tvb) >= 2)
             request->info_id = tvb_get_uint8(tvb, 1);
         wmem_array_append_one(state->requests, request);
-    } else if (!is_trace) {
+    } else {
         /* Pair with the oldest unanswered request of the same command. */
         n = wmem_array_get_count(state->requests);
         for (i = state->response_cursor[command]; i < n; i++) {
@@ -1434,19 +1435,32 @@ dissect_cmsis_dap(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *dat
     if (urb == NULL || urb->conv == NULL || length == 0)
         return 0;
     state = get_conv_state(urb);
-    const bool is_request = urb_is_request(urb);
     const bool is_trace = state->eps.trace && urb->endpoint == state->eps.trace;
+    if (is_trace) {
+        trace_fragment_t *prefix = p_get_proto_data(wmem_file_scope(), pinfo,
+            proto_cmsis_dap, PROTO_DATA_TRACE);
+        if (prefix == NULL) {
+            if (PINFO_FD_VISITED(pinfo))
+                return 0;
+            prefix = wmem_new(wmem_file_scope(), trace_fragment_t);
+            *prefix = state->tail;
+            p_add_proto_data(wmem_file_scope(), pinfo, proto_cmsis_dap,
+                PROTO_DATA_TRACE, prefix);
+        }
+        dissect_trace(tvb, pinfo, tree, prefix, &state->tail);
+        return length;
+    }
+
+    const bool is_request = urb_is_request(urb);
     const uint8_t command = tvb_get_uint8(tvb, 0);
-    frame = p_get_proto_data(wmem_file_scope(), pinfo, proto_cmsis_dap, 0);
+    frame = p_get_proto_data(wmem_file_scope(), pinfo, proto_cmsis_dap,
+        PROTO_DATA_FRAME);
     if (frame == NULL) {
         if (PINFO_FD_VISITED(pinfo))
             return 0;
         frame = new_frame_record(tvb, pinfo, urb, state, command);
-        p_add_proto_data(wmem_file_scope(), pinfo, proto_cmsis_dap, 0, frame);
-    }
-    if (is_trace) {
-        dissect_trace(tvb, pinfo, tree, &frame->prefix, &state->tail);
-        return length;
+        p_add_proto_data(wmem_file_scope(), pinfo, proto_cmsis_dap,
+            PROTO_DATA_FRAME, frame);
     }
 
     col_set_str(pinfo->cinfo, COL_PROTOCOL, "USBDAP");
@@ -1501,8 +1515,11 @@ dissect_cmsis_dap_heur(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void
 
     if (urb == NULL || urb->conv == NULL)
         return false;
-    /* A frame accepted earlier is remembered by its frame record. */
-    if (p_get_proto_data(wmem_file_scope(), pinfo, proto_cmsis_dap, 0) != NULL) {
+    /* A frame accepted earlier is marked with protocol data. */
+    if (p_get_proto_data(wmem_file_scope(), pinfo, proto_cmsis_dap,
+            PROTO_DATA_FRAME) != NULL ||
+        p_get_proto_data(wmem_file_scope(), pinfo, proto_cmsis_dap,
+            PROTO_DATA_TRACE) != NULL) {
         if (PINFO_FD_VISITED(pinfo))
             dissect_cmsis_dap(tvb, pinfo, tree, urb);
         return true;

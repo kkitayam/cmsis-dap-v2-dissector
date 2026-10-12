@@ -233,11 +233,15 @@ typedef struct {
 } request_record_t;
 
 typedef struct {
+    uint32_t frame;
+    uint8_t len;
+    uint8_t buf[16];
+} trace_fragment_t;
+
+typedef struct {
     request_record_t *request;
     uint8_t command;
-    uint8_t trace_prefix[16];
-    unsigned trace_prefix_length;
-    uint32_t trace_prefix_frame;
+    trace_fragment_t prefix;
     bool is_request;
     bool is_trace;
 } frame_record_t;
@@ -250,9 +254,7 @@ typedef struct {
     uint8_t out_endpoint;
     uint8_t in_endpoint;
     uint8_t trace_endpoint;
-    uint8_t trace_tail[16];
-    unsigned trace_tail_length;
-    uint32_t trace_tail_frame;
+    trace_fragment_t tail;
 } device_state_t;
 
 /* Control descriptors are bridged to bulk conversations by bus/device. */
@@ -866,39 +868,38 @@ parse_swo_stream(tvbuff_t *tvb, proto_tree *tree, wmem_strbuf_t *summary,
 }
 
 static void
-dissect_trace(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, device_state_t *state,
-    frame_record_t *frame)
+dissect_trace(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
+    trace_fragment_t *prefix, trace_fragment_t *tail)
 {
     const bool first_pass = !PINFO_FD_VISITED(pinfo);
-    unsigned current_length = tvb_captured_length(tvb), parsed, packet_count, total;
+    unsigned current_length = tvb_captured_length(tvb), parsed, packet_count;
     proto_tree *dap_tree = add_root(tvb, pinfo, tree);
     wmem_strbuf_t *summary = wmem_strbuf_new(wmem_packet_scope(), "");
     uint8_t *merged;
     tvbuff_t *stream;
 
-    if (first_pass) {
-        frame->trace_prefix_length = state->trace_tail_length;
-        frame->trace_prefix_frame = state->trace_tail_frame;
-        memcpy(frame->trace_prefix, state->trace_tail, state->trace_tail_length);
-    }
-    total = current_length + frame->trace_prefix_length;
+    if (first_pass)
+        *prefix = *tail;
+    unsigned total = current_length + prefix->len;
     merged = wmem_alloc(wmem_packet_scope(), total);
-    memcpy(merged, frame->trace_prefix, frame->trace_prefix_length);
-    if (frame->trace_prefix_length > 0 && frame->trace_prefix_frame != 0)
-        add_generated_frame(tvb, dap_tree, hf_swo_reassembled, frame->trace_prefix_frame);
-    tvb_memcpy(tvb, merged + frame->trace_prefix_length, 0, current_length);
+    memcpy(merged, prefix->buf, prefix->len);
+    if (prefix->len > 0 && prefix->frame != 0)
+        add_generated_frame(tvb, dap_tree, hf_swo_reassembled, prefix->frame);
+    tvb_memcpy(tvb, merged + prefix->len, 0, current_length);
 
     stream = tvb_new_child_real_data(tvb, merged, total, total);
     add_new_data_source(pinfo, stream, "Reassembled SWO trace");
     parsed = parse_swo_stream(stream, dap_tree, summary, &packet_count);
     if (first_pass) {
-        state->trace_tail_length = total - parsed;
-        state->trace_tail_frame = 0;
-        if (state->trace_tail_length > sizeof(state->trace_tail)) {
-            state->trace_tail_length = 0;
-        } else if (state->trace_tail_length > 0) {
-            memcpy(state->trace_tail, merged + parsed, state->trace_tail_length);
-            state->trace_tail_frame = pinfo->num;
+        unsigned remain = total - parsed;
+        if (remain > sizeof(tail->buf)) {
+            tail->len = 0;
+            tail->frame = 0;
+        } else {
+            tail->len = (uint8_t)remain;
+            tail->frame = remain ? pinfo->num : 0;
+            if (remain)
+                memcpy(tail->buf, merged + parsed, remain);
         }
     }
     col_set_str(pinfo->cinfo, COL_PROTOCOL, "USBDAP");
@@ -1445,7 +1446,7 @@ dissect_cmsis_dap(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *dat
         p_add_proto_data(wmem_file_scope(), pinfo, proto_cmsis_dap, 0, frame);
     }
     if (frame->is_trace) {
-        dissect_trace(tvb, pinfo, tree, state, frame);
+        dissect_trace(tvb, pinfo, tree, &frame->prefix, &state->tail);
         return length;
     }
 

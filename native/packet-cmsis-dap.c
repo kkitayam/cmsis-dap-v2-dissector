@@ -1532,13 +1532,7 @@ static bool
 dissect_cmsis_dap_heur(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data)
 {
     urb_info_t *urb = data;
-    usb_conv_info_t *usb_info;
-    dap_conv_state_t *state;
-    device_track_t *track;
-    interface_candidate_t *candidate;
-    bool is_request, is_trace = false;
-
-    if (urb == NULL || urb->conv == NULL)
+    if (urb == NULL || urb->conv == NULL || tvb_captured_length(tvb) == 0)
         return false;
     /* A frame accepted earlier is marked with protocol data. */
     if (p_get_proto_data(wmem_file_scope(), pinfo, proto_cmsis_dap,
@@ -1549,22 +1543,22 @@ dissect_cmsis_dap_heur(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void
             dissect_cmsis_dap(tvb, pinfo, tree, urb);
         return true;
     }
-    usb_info = urb->conv;
-    if (PINFO_FD_VISITED(pinfo) || tvb_captured_length(tvb) == 0 ||
-            !usb_class_compatible_with_cmsis_dap(usb_info))
+    usb_conv_info_t *usb_info = urb->conv;
+    if (PINFO_FD_VISITED(pinfo) || !usb_class_compatible_with_cmsis_dap(usb_info))
         return false;
 
-    is_request = urb_is_request(urb);
-    track = lookup_device_track(urb->bus_id, urb->device_address);
-    candidate = track ? wmem_map_lookup(track->candidates,
+    bool is_request = urb_is_request(urb);
+    device_track_t *track = lookup_device_track(urb->bus_id, urb->device_address);
+    interface_candidate_t *candidate = track ? wmem_map_lookup(track->candidates,
         GUINT_TO_POINTER(usb_info->interfaceNum)) : NULL;
-    state = lookup_dap_conv_state(pinfo, urb);
+    dap_conv_state_t *state = lookup_dap_conv_state(pinfo, urb);
 
     /* A successful payload probe is per-packet only; enumeration grants trust. */
     if (state == NULL && candidate && candidate->confirmed) {
         state = new_dap_conv_state(pinfo, urb);
         state->eps = candidate->eps;
     }
+    bool is_trace = false;
     if (state == NULL) {
         if (!is_request)
             return false;

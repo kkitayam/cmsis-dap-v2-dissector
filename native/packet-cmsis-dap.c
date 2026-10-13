@@ -898,7 +898,7 @@ parse_swo_stream(tvbuff_t *tvb, proto_tree *tree, wmem_strbuf_t *summary,
 
 static int
 dissect_trace(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
-    dap_conv_state_t *state)
+    trace_fragment_t *tail)
 {
     const bool first_pass = !PINFO_FD_VISITED(pinfo);
     unsigned current_length = tvb_captured_length(tvb), parsed, packet_count;
@@ -908,7 +908,7 @@ dissect_trace(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
         if (!first_pass)
             return 0;
         prefix = wmem_new(wmem_file_scope(), trace_fragment_t);
-        *prefix = state->tail;
+        *prefix = *tail;
         p_add_proto_data(wmem_file_scope(), pinfo, proto_cmsis_dap,
             PROTO_DATA_TRACE, prefix);
     }
@@ -929,14 +929,14 @@ dissect_trace(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
     parsed = parse_swo_stream(stream, dap_tree, summary, &packet_count);
     if (first_pass) {
         unsigned remain = total - parsed;
-        if (remain > sizeof(state->tail.buf)) {
-            state->tail.len = 0;
-            state->tail.frame = 0;
+        if (remain > sizeof(tail->buf)) {
+            tail->len = 0;
+            tail->frame = 0;
         } else {
-            state->tail.len = (uint8_t)remain;
-            state->tail.frame = remain ? pinfo->num : 0;
+            tail->len = (uint8_t)remain;
+            tail->frame = remain ? pinfo->num : 0;
             if (remain)
-                memcpy(state->tail.buf, merged + parsed, remain);
+                memcpy(tail->buf, merged + parsed, remain);
         }
     }
     col_set_str(pinfo->cinfo, COL_PROTOCOL, "USBDAP");
@@ -1474,7 +1474,7 @@ dissect_cmsis_dap(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *dat
     state = lookup_dap_conv_state(pinfo, urb);
     const bool is_trace = state && state->eps.trace && urb->endpoint == state->eps.trace;
     if (is_trace)
-        return dissect_trace(tvb, pinfo, tree, state);
+        return dissect_trace(tvb, pinfo, tree, &state->tail);
 
     const bool is_request = urb_is_request(urb);
     const uint8_t command = tvb_get_uint8(tvb, 0);

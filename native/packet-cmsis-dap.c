@@ -896,12 +896,22 @@ parse_swo_stream(tvbuff_t *tvb, proto_tree *tree, wmem_strbuf_t *summary,
     return offset;
 }
 
-static void
+static int
 dissect_trace(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
-    trace_fragment_t *prefix, trace_fragment_t *tail)
+    dap_conv_state_t *state)
 {
     const bool first_pass = !PINFO_FD_VISITED(pinfo);
     unsigned current_length = tvb_captured_length(tvb), parsed, packet_count;
+    trace_fragment_t *prefix = p_get_proto_data(wmem_file_scope(), pinfo,
+        proto_cmsis_dap, PROTO_DATA_TRACE);
+    if (prefix == NULL) {
+        if (!first_pass)
+            return 0;
+        prefix = wmem_new(wmem_file_scope(), trace_fragment_t);
+        *prefix = state->tail;
+        p_add_proto_data(wmem_file_scope(), pinfo, proto_cmsis_dap,
+            PROTO_DATA_TRACE, prefix);
+    }
     proto_tree *dap_tree = add_root(tvb, pinfo, tree);
     wmem_strbuf_t *summary = wmem_strbuf_new(wmem_packet_scope(), "");
     uint8_t *merged;
@@ -919,19 +929,20 @@ dissect_trace(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
     parsed = parse_swo_stream(stream, dap_tree, summary, &packet_count);
     if (first_pass) {
         unsigned remain = total - parsed;
-        if (remain > sizeof(tail->buf)) {
-            tail->len = 0;
-            tail->frame = 0;
+        if (remain > sizeof(state->tail.buf)) {
+            state->tail.len = 0;
+            state->tail.frame = 0;
         } else {
-            tail->len = (uint8_t)remain;
-            tail->frame = remain ? pinfo->num : 0;
+            state->tail.len = (uint8_t)remain;
+            state->tail.frame = remain ? pinfo->num : 0;
             if (remain)
-                memcpy(tail->buf, merged + parsed, remain);
+                memcpy(state->tail.buf, merged + parsed, remain);
         }
     }
     col_set_str(pinfo->cinfo, COL_PROTOCOL, "USBDAP");
     col_add_fstr(pinfo->cinfo, COL_INFO, "SWO_Data %u packet(s) %s", packet_count,
         wmem_strbuf_get_str(summary));
+    return current_length;
 }
 
 /* ---- Command dissection ---- */
@@ -1460,24 +1471,10 @@ dissect_cmsis_dap(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *dat
     proto_tree *dap_tree;
     wmem_strbuf_t *info;
 
-    if (urb == NULL || urb->conv == NULL || length == 0)
-        return 0;
     state = lookup_dap_conv_state(pinfo, urb);
     const bool is_trace = state && state->eps.trace && urb->endpoint == state->eps.trace;
-    if (is_trace) {
-        trace_fragment_t *prefix = p_get_proto_data(wmem_file_scope(), pinfo,
-            proto_cmsis_dap, PROTO_DATA_TRACE);
-        if (prefix == NULL) {
-            if (PINFO_FD_VISITED(pinfo))
-                return 0;
-            prefix = wmem_new(wmem_file_scope(), trace_fragment_t);
-            *prefix = state->tail;
-            p_add_proto_data(wmem_file_scope(), pinfo, proto_cmsis_dap,
-                PROTO_DATA_TRACE, prefix);
-        }
-        dissect_trace(tvb, pinfo, tree, prefix, &state->tail);
-        return length;
-    }
+    if (is_trace)
+        return dissect_trace(tvb, pinfo, tree, state);
 
     const bool is_request = urb_is_request(urb);
     const uint8_t command = tvb_get_uint8(tvb, 0);

@@ -1564,9 +1564,8 @@ dissect_cmsis_dap_heur(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void
     state = lookup_dap_conv_state(pinfo, urb);
 
     /* A successful payload probe is per-packet only; enumeration grants trust. */
-    if (candidate && candidate->confirmed) {
-        if (state == NULL)
-            state = new_dap_conv_state(pinfo, urb);
+    if (state == NULL && candidate && candidate->confirmed) {
+        state = new_dap_conv_state(pinfo, urb);
         state->eps = candidate->eps;
     }
     if (state == NULL) {

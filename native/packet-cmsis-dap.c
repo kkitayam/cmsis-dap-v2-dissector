@@ -1,4 +1,5 @@
 #include <epan/column-utils.h>
+#include <epan/conversation.h>
 #include <epan/dissectors/packet-usb.h>
 #include <epan/expert.h>
 #include <epan/ftypes/ftypes.h>
@@ -258,7 +259,7 @@ typedef struct {
     bool is_cmsis_dap;
     dap_endpoints_t eps;
     trace_fragment_t tail;
-} device_state_t;
+} dap_conv_state_t;
 
 /* Control descriptors are bridged to bulk conversations by bus/device. */
 static wmem_map_t *device_tracks;
@@ -483,16 +484,29 @@ get_device_track(uint16_t bus_id, uint32_t device_address)
     return track;
 }
 
-static device_state_t *
-get_conv_state(urb_info_t *urb)
+static dap_conv_state_t *
+get_dap_conv_state(packet_info *pinfo, const urb_info_t *urb)
 {
-    device_state_t *state = urb->conv->class_data;
+    /* USB endpoint conversations differ by direction, but DAP state spans an interface. */
+    conversation_element_t elements[] = {
+        { .type = CE_STRING, .str_val = "CMSIS-DAP" },
+        { .type = CE_UINT, .uint_val = urb->bus_id },
+        { .type = CE_UINT, .uint_val = urb->device_address },
+        { .type = CE_UINT, .uint_val = urb->conv->interfaceNum },
+        { .type = CE_CONVERSATION_TYPE, .conversation_type_val = CONVERSATION_USB }
+    };
+    conversation_t *conv = find_conversation_full(pinfo->num, elements);
+    if (conv == NULL) {
+        conv = conversation_new_full(pinfo->num, elements);
+    }
+    dap_conv_state_t *state = (dap_conv_state_t *)conversation_get_proto_data(
+        conv, proto_cmsis_dap);
 
     if (state == NULL) {
         /* Kept across SET_CONFIGURATION; later passes need the first-pass records. */
-        state = wmem_new0(wmem_file_scope(), device_state_t);
+        state = wmem_new0(wmem_file_scope(), dap_conv_state_t);
         state->requests = wmem_array_new(wmem_file_scope(), sizeof(request_record_t *));
-        urb->conv->class_data = state;
+        conversation_add_proto_data(conv, proto_cmsis_dap, state);
     }
     return state;
 }
@@ -1385,7 +1399,7 @@ urb_is_request(const urb_info_t *urb)
 
 static frame_record_t *
 new_frame_record(tvbuff_t *tvb, packet_info *pinfo, const urb_info_t *urb,
-    device_state_t *state, uint8_t command)
+    dap_conv_state_t *state, uint8_t command)
 {
     frame_record_t *frame = wmem_new0(wmem_file_scope(), frame_record_t);
     request_record_t *request = NULL;
@@ -1427,14 +1441,14 @@ dissect_cmsis_dap(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *dat
      */
     urb_info_t *urb = data;
     unsigned length = tvb_captured_length(tvb);
-    device_state_t *state;
+    dap_conv_state_t *state;
     frame_record_t *frame;
     proto_tree *dap_tree;
     wmem_strbuf_t *info;
 
     if (urb == NULL || urb->conv == NULL || length == 0)
         return 0;
-    state = get_conv_state(urb);
+    state = get_dap_conv_state(pinfo, urb);
     const bool is_trace = state->eps.trace && urb->endpoint == state->eps.trace;
     if (is_trace) {
         trace_fragment_t *prefix = p_get_proto_data(wmem_file_scope(), pinfo,
@@ -1508,7 +1522,7 @@ dissect_cmsis_dap_heur(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void
 {
     urb_info_t *urb = data;
     usb_conv_info_t *usb_info;
-    device_state_t *state;
+    dap_conv_state_t *state;
     device_track_t *track;
     interface_candidate_t *candidate;
     bool is_request, is_trace = false;
@@ -1529,7 +1543,7 @@ dissect_cmsis_dap_heur(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void
             !usb_class_compatible_with_cmsis_dap(usb_info))
         return false;
 
-    state = get_conv_state(urb);
+    state = get_dap_conv_state(pinfo, urb);
     is_request = urb_is_request(urb);
     track = lookup_device_track(urb->bus_id, urb->device_address);
     candidate = track ? wmem_map_lookup(track->candidates,

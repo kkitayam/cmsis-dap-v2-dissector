@@ -507,7 +507,7 @@ lookup_dap_conv_state(packet_info *pinfo, const urb_info_t *urb)
 }
 
 static dap_conv_state_t *
-get_dap_conv_state(packet_info *pinfo, const urb_info_t *urb)
+new_dap_conv_state(packet_info *pinfo, const urb_info_t *urb)
 {
     conversation_element_t elements[5];
 
@@ -516,15 +516,10 @@ get_dap_conv_state(packet_info *pinfo, const urb_info_t *urb)
     if (conv == NULL) {
         conv = conversation_new_full(pinfo->num, elements);
     }
-    dap_conv_state_t *state = (dap_conv_state_t *)conversation_get_proto_data(
-        conv, proto_cmsis_dap);
-
-    if (state == NULL) {
-        /* Kept across SET_CONFIGURATION; later passes need the first-pass records. */
-        state = wmem_new0(wmem_file_scope(), dap_conv_state_t);
-        state->requests = wmem_array_new(wmem_file_scope(), sizeof(request_record_t *));
-        conversation_add_proto_data(conv, proto_cmsis_dap, state);
-    }
+    /* The caller only creates state after lookup_dap_conv_state returns NULL. */
+    dap_conv_state_t *state = wmem_new0(wmem_file_scope(), dap_conv_state_t);
+    state->requests = wmem_array_new(wmem_file_scope(), sizeof(request_record_t *));
+    conversation_add_proto_data(conv, proto_cmsis_dap, state);
     return state;
 }
 
@@ -1570,7 +1565,8 @@ dissect_cmsis_dap_heur(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void
 
     /* A successful payload probe is per-packet only; enumeration grants trust. */
     if (candidate && candidate->confirmed) {
-        state = get_dap_conv_state(pinfo, urb);
+        if (state == NULL)
+            state = new_dap_conv_state(pinfo, urb);
         state->eps = candidate->eps;
     }
     if (state == NULL) {

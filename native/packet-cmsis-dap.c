@@ -581,11 +581,10 @@ single_descriptor_start(const field_info *type_field, uint8_t type, unsigned min
 {
     tvbuff_t *tvb = type_field->ds_tvb;
     int start = type_field->start - 1;
-    int remaining;
 
     if (tvb == NULL || start < 0)
         return -1;
-    remaining = tvb_captured_length_remaining(tvb, start);
+    int remaining = tvb_captured_length_remaining(tvb, start);
     if (remaining < 2 || tvb_get_uint8(tvb, start) < min_length ||
         remaining != tvb_get_uint8(tvb, start) ||
         tvb_get_uint8(tvb, type_field->start) != type)
@@ -694,19 +693,19 @@ process_string_response(device_track_t *track, proto_tree *tree,
 {
     field_info *request_in = usb_first_field(tree, hf_usb_request_in);
     field_info *string = usb_first_field(tree, hf_usb_string);
-    void *key, *index_value;
-    string_match_t match;
 
     if (request_in == NULL || string == NULL)
         return;
-    key = GUINT_TO_POINTER(fvalue_get_uinteger(request_in->value));
-    index_value = wmem_map_lookup(track->string_requests, key);
+    void *key = GUINT_TO_POINTER(fvalue_get_uinteger(request_in->value));
+    void *index_value = wmem_map_lookup(track->string_requests, key);
     if (index_value == NULL)
         return;
     wmem_map_remove(track->string_requests, key);
 
-    match.index = GPOINTER_TO_UINT(index_value) - 1;
-    match.matches = string_contains_cmsis_dap(fvalue_get_string(string->value));
+    string_match_t match = {
+        .index = GPOINTER_TO_UINT(index_value) - 1,
+        .matches = string_contains_cmsis_dap(fvalue_get_string(string->value))
+    };
     if (wmem_map_foreach_remove(track->candidates, apply_string_match, &match) > 0 &&
             wmem_map_size(track->candidates) == 0)
         wmem_map_remove(device_tracks, device_track_key(bus_id, device_address));
@@ -716,22 +715,18 @@ static int
 dissect_usb_identity(tvbuff_t *tvb _U_, packet_info *pinfo, proto_tree *tree,
     void *data _U_)
 {
-    uint16_t bus_id;
-    uint32_t address;
-    field_info *type_field, *index_field;
-    device_track_t *track;
-    int start;
-
     if (PINFO_FD_VISITED(pinfo) || tree == NULL)
         return 0;
-    address = usb_device_address(pinfo, &bus_id);
-    type_field = address ? usb_first_field(tree, hf_usb_descriptor_type) : NULL;
+    uint16_t bus_id;
+    uint32_t address = usb_device_address(pinfo, &bus_id);
+    field_info *type_field = address ? usb_first_field(tree, hf_usb_descriptor_type) : NULL;
     if (type_field == NULL)
         return 0;
 
-    track = lookup_device_track(bus_id, address);
-    index_field = usb_first_field(tree, hf_usb_descriptor_index);
+    device_track_t *track = lookup_device_track(bus_id, address);
+    field_info *index_field = usb_first_field(tree, hf_usb_descriptor_index);
 
+    int start;
     switch (fvalue_get_uinteger(type_field->value)) {
     case USB_DESCRIPTOR_DEVICE:
         start = single_descriptor_start(type_field, USB_DESCRIPTOR_DEVICE, 18);
@@ -1544,7 +1539,8 @@ dissect_cmsis_dap_heur(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void
         GUINT_TO_POINTER(usb_info->interfaceNum)) : NULL;
     dap_conv_state_t *state = lookup_dap_conv_state(pinfo, urb);
 
-    /* A successful payload probe is per-packet only; enumeration grants trust. */
+    /* Confirmed candidates supply endpoints; otherwise learn from the first
+     * matching request/response payloads. */
     if (state == NULL && candidate && candidate->confirmed) {
         state = new_dap_conv_state(pinfo, urb);
         state->eps = candidate->eps;
@@ -1557,8 +1553,9 @@ dissect_cmsis_dap_heur(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void
         if (urb->endpoint != state->eps.out)
             return false;
     } else {
-        is_trace = state->eps.trace && urb->endpoint == state->eps.trace;
-        if (!is_trace && urb->endpoint != state->eps.in)
+        if (urb->endpoint == state->eps.trace)
+            is_trace = true;
+        else if (state->eps.in && urb->endpoint != state->eps.in)
             return false;
     }
 
@@ -1566,6 +1563,14 @@ dissect_cmsis_dap_heur(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void
         return dissect_trace(tvb, pinfo, tree, &state->tail) > 0;
     else if (!looks_like_cmsis_dap_command(tvb, is_request))
         return false;
+
+    if (state == NULL) {
+        state = new_dap_conv_state(pinfo, urb);
+        state->eps.out = urb->endpoint;
+    }
+    if (!is_request && !state->eps.in)
+        state->eps.in = urb->endpoint;
+
     return dissect_cmsis_dap(tvb, pinfo, tree, urb) > 0;
 }
 
